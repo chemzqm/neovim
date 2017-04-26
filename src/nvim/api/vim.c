@@ -987,6 +987,78 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
   return buf->b_fnum;
 }
 
+/// Open a new window.
+///
+/// Currently this is used to open floating and external windows.
+/// Floats are windows that are drawn above the split layout, at some anchor
+/// position in some other window. Floats can be draw internally or by external
+/// GUI with the |ui-multigrid| extension. External windows are only supported
+/// with multigrid GUIs, and are displayed as separate top-level windows.
+///
+/// Exactly one of `external` and `relative` must be specified.
+///
+/// @param buffer handle of buffer to be displayed in the window
+/// @param enter whether the window should be entered (made the current window)
+/// @param width width of window (in character cells)
+/// @param height height of window (in character cells)
+/// @param options dict of options for configuring window positioning
+///                accepts the following keys:
+///     `external` GUI should display the float as an external
+///         top-level window. Currently accepts no other positioning options
+///         together with this.
+///     `relative`: If set, the window becomes floating window. The window
+///         will be placed with row,col coordinates relative one of the
+///         following:
+///        "editor" the global editor grid (default)
+///        "window" window id for placing relative another window.
+///        "cursor" the cursor position in current window.
+///     `anchor`:   the corner of the float that the row,col position defines
+///        "NW" north-west (default)
+///        "NE" north-east
+///        "SW" south-west
+///        "SE" south-east
+///     `unfocusable`: The window will not be focused by wincmds and
+///         mouse events. It can still be made current by API calls.
+///     `row`: row position. Screen cell height are used as unit.  Can be
+///         floating point.
+///     `col`: column position. Screen cell width is used as unit. Can be
+///         floating point.
+///
+///  Currently positions can only be specified as screen cells. With editor
+///  positioning row=0, col=0 refers to the top-left corner of the screen-grid
+///  and row=Lines-1, Columns-1 refers to the bottom-right corner. Floating
+///  point values are allowed, but the builtin implementation (used by TUI and
+///  GUIs without multigrid support) will always round down to an integer.
+///
+///  The behavior of out-of-bounds values, and other configurations that make
+///  the float not fit inside the main editor, is not specified. The builtin
+///  implementation will truncate values so floats are completely
+///  within the main screen grid. External GUIs could let floats hover slightly
+///  outside of the main window, like a tooltip, but this should not be used to
+///  specify arbitrary WM screen positions.
+///
+/// @param[out] err Error details, if any
+/// @return the buffer handle or 0 when error
+Window nvim_open_win(Buffer buffer, Boolean enter,
+                     Integer width, Integer height,
+                     Dictionary options, Error *err)
+  FUNC_API_SINCE(5)
+{
+  win_T *old = curwin;
+  FloatConfig config = FLOAT_CONFIG_INIT;
+  if (!parse_float_config(options, &config, false, err)) {
+    return 0;
+  }
+  win_T *wp = win_new_float(NULL, (int)width, (int)height, config);
+  if (buffer > 0) {
+    nvim_set_current_buf(buffer, err);
+  }
+  if (!enter) {
+    win_enter(old, false);
+  }
+  return wp->handle;
+}
+
 /// Gets the current list of tabpage handles.
 ///
 /// @return List of tabpage handles

@@ -520,8 +520,14 @@ tabs.
 	size). If the window was previously hidden, it should now be shown
 	again.
 
+TODO: OUT OF DATE
+["win_float_pos", win, grid, options]
+	Display or reconfigure floating window `win`. A `grid` handle is allocated
+	for drawing on the window using |ui-newgrid| events. For the meaning of
+	`options` see |nvim_open_float_win|.
+
 ["win_hide", grid]
-	Stop displaying the window.
+	Stop displaying the window. The window can be shown a gain later.
 
 ["win_scroll_over_start"]
 	Hint that following `grid_scroll` on the default grid should
@@ -532,6 +538,9 @@ tabs.
 ["win_scroll_over_reset"]
 	Hint that scrolled over windows should be redrawn again, and not be
 	overdrawn by default grid scrolling anymore.
+
+["win_close", grid]
+	Close the window. TODO: redundant with grid_destroy?
 
 See |ui-linegrid| for grid events.
 See |nvim_ui_try_resize_grid| in |api-ui| to request changing the grid size.

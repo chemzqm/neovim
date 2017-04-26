@@ -11,6 +11,7 @@ typedef struct {
   char_u *pum_info;        // extra info
 } pumitem_T;
 
+EXTERN ScreenGrid pum_grid INIT(= SCREEN_GRID_INIT);
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "popupmnu.h.generated.h"
