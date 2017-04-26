@@ -17,6 +17,7 @@
 #include "nvim/ui.h"
 #include "nvim/highlight.h"
 #include "nvim/memory.h"
+#include "nvim/popupmnu.h"
 #include "nvim/ui_compositor.h"
 #include "nvim/ugrid.h"
 #include "nvim/screen.h"
@@ -107,7 +108,8 @@ bool ui_comp_should_draw(void)
 /// TODO(bfredl): later on the compositor should just use win_float_pos events,
 /// though that will require slight event order adjustment: emit the win_pos
 /// events in the beginning of  update_screen(0), rather than in ui_flush()
-bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width)
+bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
+                      bool valid)
 {
   if (grid->comp_index != 0) {
     bool moved = (row != grid->comp_row) || (col != grid->comp_col);
@@ -148,6 +150,10 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width)
   grid->comp_row = row;
   grid->comp_col = col;
   grid->comp_index = kv_size(layers)-1;
+  if (valid && ui_comp_should_draw()) {
+    compose_area(grid->comp_row, grid->comp_row+grid->Rows,
+                 grid->comp_col, grid->comp_col+grid->Columns);
+  }
   return true;
 }
 
@@ -259,8 +265,7 @@ static void compose_line(Integer row, Integer startcol, Integer endcol,
     memcpy(linebuf+(col-startcol), grid->chars+off, n * sizeof(*linebuf));
     memcpy(attrbuf+(col-startcol), grid->attrs+off, n * sizeof(*attrbuf));
 
-    // 'pumblend'
-    if (grid != &default_grid && p_pb) {
+    if (grid == &pum_grid && p_pb) {
       for (int i = col-(int)startcol; i < until-startcol; i++) {
         bool thru = strequal((char *)linebuf[i], " ");  // negative space
         attrbuf[i] = (sattr_T)hl_blend_attrs(bg_attrs[i], attrbuf[i], thru);
@@ -348,7 +353,8 @@ static void ui_comp_raw_line(UI *ui, Integer grid, Integer row,
   assert(row < default_grid.Rows);
   assert(clearcol <= default_grid.Columns);
   if (flags & kLineFlagInvalid
-      || kv_size(layers) > (p_pb ? 1 : curgrid->comp_index+1)) {
+      || kv_size(layers) > curgrid->comp_index+1
+      || (p_pb && curgrid == &pum_grid)) {
     compose_line(row, startcol, clearcol, flags);
   } else {
     ui_composed_call_raw_line(1, row, startcol, endcol, clearcol, clearattr,

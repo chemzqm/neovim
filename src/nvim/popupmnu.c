@@ -46,8 +46,6 @@ static bool pum_is_drawn = false;
 static bool pum_external = false;
 static bool pum_invalid = false;  // the screen was just cleared
 
-static ScreenGrid pum_grid = SCREEN_GRID_INIT;
-
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "popupmnu.c.generated.h"
 #endif
@@ -360,7 +358,7 @@ void pum_redraw(void)
 
   grid_assign_handle(&pum_grid);
   bool moved = ui_comp_put_grid(&pum_grid, pum_row, pum_col-col_off,
-                                pum_height, grid_width);
+                                pum_height, grid_width, false);
   bool invalid_grid = moved || pum_invalid;
   pum_invalid = false;
 
@@ -371,6 +369,8 @@ void pum_redraw(void)
   } else if (invalid_grid) {
     grid_invalidate(&pum_grid);
   }
+  ui_call_win_float_pos(pum_grid.handle, 0, cstr_to_string("SW"), 1, pum_row, pum_col-col_off,
+                        (Dictionary)ARRAY_DICT_INIT);
 
 
   // Never display more than we have
