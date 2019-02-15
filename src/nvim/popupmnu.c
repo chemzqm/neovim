@@ -828,3 +828,19 @@ int pum_get_height(void)
 {
   return pum_height;
 }
+
+/// Gets bounding of popup menu.
+dict_T *pum_get_bounding(void)
+{
+  // {row, col, width, height, scrollbar}
+  dict_T *dict = tv_dict_alloc();
+  if (!pum_visible()) {
+    return dict;
+  }
+  tv_dict_add_nr(dict, S_LEN("height"), pum_height);
+  tv_dict_add_nr(dict, S_LEN("width"), pum_width);
+  tv_dict_add_nr(dict, S_LEN("row"), pum_row);
+  tv_dict_add_nr(dict, S_LEN("col"), pum_col);
+  tv_dict_add_nr(dict, S_LEN("scrollbar"), pum_scrollbar);
+  return dict;
+}

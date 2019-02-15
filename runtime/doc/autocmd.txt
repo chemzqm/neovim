@@ -350,6 +350,7 @@ Name			triggered by ~
 |SessionLoadPost|	after loading a session file
 
 |MenuPopup|		just before showing the popup menu
+|CompleteChanged|	after change completion item
 |CompleteDone|		after Insert mode completion is done
 
 |User|			to be used in combination with ":doautocmd"
@@ -576,6 +577,15 @@ ColorScheme			After loading a color scheme. |:colorscheme|
 ColorSchemePre			Before loading a color scheme. |:colorscheme|
 				Useful to setup removing things added by a
 				color scheme, before another one is loaded.
+
+CompleteChanged 					*CompleteChanged*
+
+				After change of completion item.
+				Sets these |v:event| keys:
+				    completeitem
+				    pumbounding
+
+				It is not allowed to change the text |textlock|.
 
 							*CompleteDone*
 CompleteDone			After Insert mode completion is done.  Either

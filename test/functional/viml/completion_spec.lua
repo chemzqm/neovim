@@ -959,4 +959,49 @@ describe('completion', function()
       set complete&vim completeopt&vim
     ]])
   end)
+
+  it('CompleteChanged autocommand', function()
+    curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar', ''})
+    source([[
+      set complete=. completeopt=noinsert,noselect,menuone
+      function! OnCompleteChanged()
+        let g:item = get(v:event, 'completeitem', v:null)
+        let g:bounding = get(v:event, 'pumbounding', v:null)
+      endfunction
+      autocmd! CompleteChanged * :call OnCompleteChanged()
+      call cursor(4, 1)
+    ]])
+
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    eq({}, eval('g:item'))
+    eq({row = 4, col = 0, width = 15,
+        height = 2, scrollbar = 0},
+      eval('g:bounding'))
+    feed('<C-N>')
+    wait()
+    eq('foo', eval('g:item["word"]'))
+    feed('<C-N>')
+    wait()
+    eq('foobar', eval('g:item["word"]'))
+    feed('<up>')
+    wait()
+    eq('foo', eval('g:item["word"]'))
+    feed('<down>')
+    wait()
+    eq('foobar', eval('g:item["word"]'))
+    feed('<esc>')
+
+    source([[
+      unlet g:item
+      unlet g:bounding
+      delfunction OnCompleteChanged
+      au! CompleteChanged
+      set complete&vim completeopt&vim
+    ]])
+  end)
 end)
