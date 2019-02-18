@@ -1,6 +1,7 @@
-/*
- * fileio.c: read from and write to a file
- */
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
+// fileio.c: read from and write to a file
 
 #include <assert.h>
 #include <errno.h>
@@ -51,6 +52,7 @@
 #include "nvim/window.h"
 #include "nvim/shada.h"
 #include "nvim/os/os.h"
+#include "nvim/os/os_defs.h"
 #include "nvim/os/time.h"
 #include "nvim/os/input.h"
 
@@ -61,57 +63,62 @@
 #define BUFSIZE         8192    /* size of normal write buffer */
 #define SMBUFSIZE       256     /* size of emergency write buffer */
 
-/*
- * The autocommands are stored in a list for each event.
- * Autocommands for the same pattern, that are consecutive, are joined
- * together, to avoid having to match the pattern too often.
- * The result is an array of Autopat lists, which point to AutoCmd lists:
- *
- * first_autopat[0] --> Autopat.next  -->  Autopat.next -->  NULL
- *                      Autopat.cmds       Autopat.cmds
- *                          |                    |
- *                          V                    V
- *                      AutoCmd.next       AutoCmd.next
- *                          |                    |
- *                          V                    V
- *                      AutoCmd.next            NULL
- *                          |
- *                          V
- *                         NULL
- *
- * first_autopat[1] --> Autopat.next  -->  NULL
- *                      Autopat.cmds
- *                          |
- *                          V
- *                      AutoCmd.next
- *                          |
- *                          V
- *                         NULL
- *   etc.
- *
- *   The order of AutoCmds is important, this is the order in which they were
- *   defined and will have to be executed.
- */
+//
+// The autocommands are stored in a list for each event.
+// Autocommands for the same pattern, that are consecutive, are joined
+// together, to avoid having to match the pattern too often.
+// The result is an array of Autopat lists, which point to AutoCmd lists:
+//
+// last_autopat[0]  -----------------------------+
+//                                               V
+// first_autopat[0] --> Autopat.next  -->  Autopat.next -->  NULL
+//                      Autopat.cmds       Autopat.cmds
+//                          |                    |
+//                          V                    V
+//                      AutoCmd.next       AutoCmd.next
+//                          |                    |
+//                          V                    V
+//                      AutoCmd.next            NULL
+//                          |
+//                          V
+//                         NULL
+//
+// last_autopat[1]  --------+
+//                          V
+// first_autopat[1] --> Autopat.next  -->  NULL
+//                      Autopat.cmds
+//                          |
+//                          V
+//                      AutoCmd.next
+//                          |
+//                          V
+//                         NULL
+//   etc.
+//
+//   The order of AutoCmds is important, this is the order in which they were
+//   defined and will have to be executed.
+//
 typedef struct AutoCmd {
-  char_u          *cmd;                 /* The command to be executed (NULL
-                                           when command has been removed) */
-  char nested;                          /* If autocommands nest here */
-  char last;                            /* last command in list */
-  scid_T scriptID;                      /* script ID where defined */
-  struct AutoCmd  *next;                /* Next AutoCmd in list */
+  char_u          *cmd;                 // The command to be executed (NULL
+                                        // when command has been removed)
+  char nested;                          // If autocommands nest here
+  char last;                            // last command in list
+  scid_T scriptID;                      // script ID where defined
+  struct AutoCmd  *next;                // Next AutoCmd in list
 } AutoCmd;
 
 typedef struct AutoPat {
-  char_u          *pat;                 /* pattern as typed (NULL when pattern
-                                           has been removed) */
-  regprog_T       *reg_prog;            /* compiled regprog for pattern */
-  AutoCmd         *cmds;                /* list of commands to do */
-  struct AutoPat  *next;                /* next AutoPat in AutoPat list */
-  int group;                            /* group ID */
-  int patlen;                           /* strlen() of pat */
-  int buflocal_nr;                      /* !=0 for buffer-local AutoPat */
-  char allow_dirs;                      /* Pattern may match whole path */
-  char last;                            /* last pattern for apply_autocmds() */
+  struct AutoPat  *next;                // next AutoPat in AutoPat list; MUST
+                                        // be the first entry
+  char_u          *pat;                 // pattern as typed (NULL when pattern
+                                        // has been removed)
+  regprog_T       *reg_prog;            // compiled regprog for pattern
+  AutoCmd         *cmds;                // list of commands to do
+  int group;                            // group ID
+  int patlen;                           // strlen() of pat
+  int buflocal_nr;                      // !=0 for buffer-local AutoPat
+  char allow_dirs;                      // Pattern may match whole path
+  char last;                            // last pattern for apply_autocmds()
 } AutoPat;
 
 /*
@@ -199,18 +206,14 @@ void filemess(buf_T *buf, char_u *name, char_u *s, int attr)
 {
   int msg_scroll_save;
 
-  if (msg_silent != 0)
+  if (msg_silent != 0) {
     return;
-  msg_add_fname(buf, name);         /* put file name in IObuff with quotes */
-  /* If it's extremely long, truncate it. */
-  if (STRLEN(IObuff) > IOSIZE - 80)
-    IObuff[IOSIZE - 80] = NUL;
-  STRCAT(IObuff, s);
-  /*
-   * For the first message may have to start a new line.
-   * For further ones overwrite the previous one, reset msg_scroll before
-   * calling filemess().
-   */
+  }
+  add_quoted_fname((char *)IObuff, IOSIZE - 80, buf, (const char *)name);
+  xstrlcat((char *)IObuff, (const char *)s, IOSIZE);
+  // For the first message may have to start a new line.
+  // For further ones overwrite the previous one, reset msg_scroll before
+  // calling filemess().
   msg_scroll_save = msg_scroll;
   if (shortmess(SHM_OVERALL) && !exiting && p_verbose == 0)
     msg_scroll = FALSE;
@@ -225,6 +228,15 @@ void filemess(buf_T *buf, char_u *name, char_u *s, int attr)
   ui_flush();
   msg_scrolled_ign = FALSE;
 }
+
+static AutoPat *last_autopat[NUM_EVENTS] = {
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
 
 /*
  * Read lines from file "fname" into the buffer after line "from".
@@ -247,8 +259,9 @@ void filemess(buf_T *buf, char_u *name, char_u *s, int attr)
  *		stdin)
  * READ_DUMMY	read into a dummy buffer (to check if file contents changed)
  * READ_KEEP_UNDO  don't clear undo info or read it from a file
+ * READ_FIFO	read from fifo/socket instead of a file
  *
- * return FAIL for failure, OK otherwise
+ * return FAIL for failure, NOTDONE for directory (failure), or OK
  */
 int 
 readfile (
@@ -257,7 +270,7 @@ readfile (
     linenr_T from,
     linenr_T lines_to_skip,
     linenr_T lines_to_read,
-    exarg_T *eap,                       /* can be NULL! */
+    exarg_T *eap,                       // can be NULL!
     int flags
 )
 {
@@ -267,6 +280,7 @@ readfile (
   int filtering = (flags & READ_FILTER);
   int read_stdin = (flags & READ_STDIN);
   int read_buffer = (flags & READ_BUFFER);
+  int read_fifo = (flags & READ_FIFO);
   int set_options = newfile || read_buffer
                     || (eap != NULL && eap->read_edit);
   linenr_T read_buf_lnum = 1;           /* next line to read from curbuf */
@@ -280,12 +294,11 @@ readfile (
   int wasempty;                         /* buffer was empty before reading */
   colnr_T len;
   long size = 0;
-  char_u      *p;
-  off_t filesize = 0;
-  int skip_read = FALSE;
+  char_u      *p = NULL;
+  off_T filesize = 0;
+  int skip_read = false;
   context_sha256_T sha_ctx;
-  int read_undo_file = FALSE;
-  int split = 0;                        /* number of split lines */
+  int read_undo_file = false;
   linenr_T linecnt;
   int error = FALSE;                    /* errors encountered */
   int ff_error = EOL_UNKNOWN;           /* file format with errors */
@@ -300,12 +313,9 @@ readfile (
   linenr_T skip_count = 0;
   linenr_T read_count = 0;
   int msg_save = msg_scroll;
-  linenr_T read_no_eol_lnum = 0;        /* non-zero lnum when last line of
-                                        * last read was missing the eol */
-  int try_mac = (vim_strchr(p_ffs, 'm') != NULL);
-  int try_dos = (vim_strchr(p_ffs, 'd') != NULL);
-  int try_unix = (vim_strchr(p_ffs, 'x') != NULL);
-  int file_rewind = FALSE;
+  linenr_T read_no_eol_lnum = 0;        // non-zero lnum when last line of
+                                        // last read was missing the eol
+  int file_rewind = false;
   int can_retry;
   linenr_T conv_error = 0;              /* line nr with conversion error */
   linenr_T illegal_byte = 0;            /* line nr with illegal byte */
@@ -426,8 +436,8 @@ readfile (
     }
   }
 
-  if (!read_buffer && !read_stdin) {
-    perm = os_getperm(fname);
+  if (!read_buffer && !read_stdin && !read_fifo) {
+    perm = os_getperm((const char *)fname);
 #ifdef UNIX
     // On Unix it is possible to read a directory, so we have to
     // check for it before os_open().
@@ -443,13 +453,14 @@ readfile (
         // ... or a character special file named /dev/fd/<n>
 # endif
         ) {
-      if (S_ISDIR(perm))
+      if (S_ISDIR(perm)) {
         filemess(curbuf, fname, (char_u *)_("is a directory"), 0);
-      else
+      } else {
         filemess(curbuf, fname, (char_u *)_("is not a file"), 0);
+      }
       msg_end();
       msg_scroll = msg_save;
-      return FAIL;
+      return S_ISDIR(perm) ? NOTDONE : FAIL;
     }
 #endif
   }
@@ -467,8 +478,8 @@ readfile (
   if (check_readonly && !readonlymode)
     curbuf->b_p_ro = FALSE;
 
-  if (newfile && !read_stdin && !read_buffer) {
-    /* Remember time of file. */
+  if (newfile && !read_stdin && !read_buffer && !read_fifo) {
+    // Remember time of file.
     FileInfo file_info;
     if (os_fileinfo((char *)fname, &file_info)) {
       buf_store_file_info(curbuf, &file_info);
@@ -612,10 +623,12 @@ readfile (
       return FAIL;
     }
 #ifdef UNIX
-    /* Set swap file protection bits after creating it. */
+    // Set swap file protection bits after creating it.
     if (swap_mode > 0 && curbuf->b_ml.ml_mfp != NULL
-        && curbuf->b_ml.ml_mfp->mf_fname != NULL)
-      (void)os_setperm(curbuf->b_ml.ml_mfp->mf_fname, (long)swap_mode);
+        && curbuf->b_ml.ml_mfp->mf_fname != NULL) {
+      (void)os_setperm((const char *)curbuf->b_ml.ml_mfp->mf_fname,
+                       (long)swap_mode);
+    }
 #endif
   }
 
@@ -634,37 +647,46 @@ readfile (
   curbuf->b_op_start.lnum = ((from == 0) ? 1 : from);
   curbuf->b_op_start.col = 0;
 
+  int try_mac = (vim_strchr(p_ffs, 'm') != NULL);
+  int try_dos = (vim_strchr(p_ffs, 'd') != NULL);
+  int try_unix = (vim_strchr(p_ffs, 'x') != NULL);
+
   if (!read_buffer) {
     int m = msg_scroll;
     int n = msg_scrolled;
 
-    /*
-     * The file must be closed again, the autocommands may want to change
-     * the file before reading it.
-     */
-    if (!read_stdin)
-      close(fd);                /* ignore errors */
+    // The file must be closed again, the autocommands may want to change
+    // the file before reading it.
+    if (!read_stdin) {
+      close(fd);                // ignore errors
+    }
 
-    /*
-     * The output from the autocommands should not overwrite anything and
-     * should not be overwritten: Set msg_scroll, restore its value if no
-     * output was done.
-     */
-    msg_scroll = TRUE;
-    if (filtering)
+    // The output from the autocommands should not overwrite anything and
+    // should not be overwritten: Set msg_scroll, restore its value if no
+    // output was done.
+    msg_scroll = true;
+    if (filtering) {
       apply_autocmds_exarg(EVENT_FILTERREADPRE, NULL, sfname,
-          FALSE, curbuf, eap);
-    else if (read_stdin)
+                           false, curbuf, eap);
+    } else if (read_stdin) {
       apply_autocmds_exarg(EVENT_STDINREADPRE, NULL, sfname,
-          FALSE, curbuf, eap);
-    else if (newfile)
+                           false, curbuf, eap);
+    } else if (newfile) {
       apply_autocmds_exarg(EVENT_BUFREADPRE, NULL, sfname,
-          FALSE, curbuf, eap);
-    else
+                           false, curbuf, eap);
+    } else {
       apply_autocmds_exarg(EVENT_FILEREADPRE, sfname, sfname,
-          FALSE, NULL, eap);
-    if (msg_scrolled == n)
+                           false, NULL, eap);
+    }
+
+    // autocommands may have changed it
+    try_mac = (vim_strchr(p_ffs, 'm') != NULL);
+    try_dos = (vim_strchr(p_ffs, 'd') != NULL);
+    try_unix = (vim_strchr(p_ffs, 'x') != NULL);
+
+    if (msg_scrolled == n) {
       msg_scroll = m;
+    }
 
     if (aborting()) {       /* autocmds may abort script processing */
       --no_wait_return;
@@ -698,16 +720,9 @@ readfile (
   wasempty = (curbuf->b_ml.ml_flags & ML_EMPTY);
 
   if (!recoverymode && !filtering && !(flags & READ_DUMMY)) {
-    /*
-     * Show the user that we are busy reading the input.  Sometimes this
-     * may take a while.  When reading from stdin another program may
-     * still be running, don't move the cursor to the last line, unless
-     * always using the GUI.
-     */
-    if (read_stdin) {
-      mch_msg(_("Nvim: Reading from stdin...\n"));
-    } else if (!read_buffer)
+    if (!read_stdin && !read_buffer) {
       filemess(curbuf, sfname, (char_u *)"", 0);
+    }
   }
 
   msg_scroll = FALSE;                   /* overwrite the file message */
@@ -737,43 +752,14 @@ readfile (
     fenc = (char_u *)"";                /* binary: don't convert */
     fenc_alloced = FALSE;
   } else if (curbuf->b_help) {
-    char_u firstline[80];
-    int fc;
+    // Help files are either utf-8 or latin1.  Try utf-8 first, if this
+    // fails it must be latin1.
+    // It is needed when the first line contains non-ASCII characters.
+    // That is only in *.??x files.
+    fenc_next = (char_u *)"latin1";
+    fenc = (char_u *)"utf-8";
 
-    /* Help files are either utf-8 or latin1.  Try utf-8 first, if this
-     * fails it must be latin1.
-     * Always do this when 'encoding' is "utf-8".  Otherwise only do
-     * this when needed to avoid [converted] remarks all the time.
-     * It is needed when the first line contains non-ASCII characters.
-     * That is only in *.??x files. */
-    fenc = (char_u *)"latin1";
-    c = enc_utf8;
-    if (!c && !read_stdin) {
-      fc = fname[STRLEN(fname) - 1];
-      if (TOLOWER_ASC(fc) == 'x') {
-        /* Read the first line (and a bit more).  Immediately rewind to
-         * the start of the file.  If the read() fails "len" is -1. */
-        len = read_eintr(fd, firstline, 80);
-        lseek(fd, (off_t)0L, SEEK_SET);
-        for (p = firstline; p < firstline + len; ++p)
-          if (*p >= 0x80) {
-            c = TRUE;
-            break;
-          }
-      }
-    }
-
-    if (c) {
-      fenc_next = fenc;
-      fenc = (char_u *)"utf-8";
-
-      /* When the file is utf-8 but a character doesn't fit in
-       * 'encoding' don't retry.  In help text editing utf-8 bytes
-       * doesn't make sense. */
-      if (!enc_utf8)
-        keep_dest_enc = TRUE;
-    }
-    fenc_alloced = FALSE;
+    fenc_alloced = false;
   } else if (*p_fencs == NUL) {
     fenc = curbuf->b_p_fenc;            /* use format from buffer */
     fenc_alloced = FALSE;
@@ -808,9 +794,9 @@ retry:
     if (read_buffer) {
       read_buf_lnum = 1;
       read_buf_col = 0;
-    } else if (read_stdin || lseek(fd, (off_t)0L, SEEK_SET) != 0) {
-      /* Can't rewind the file, give up. */
-      error = TRUE;
+    } else if (read_stdin || vim_lseek(fd, (off_T)0L, SEEK_SET) != 0) {
+      // Can't rewind the file, give up.
+      error = true;
       goto failed;
     }
     /* Delete the previously read lines. */
@@ -926,6 +912,7 @@ retry:
      * and we can't do it internally or with iconv().
      */
     if (fio_flags == 0 && !read_stdin && !read_buffer && *p_ccv != NUL
+        && !read_fifo
 #  ifdef USE_ICONV
         && iconv_fd == (iconv_t)-1
 #  endif
@@ -966,7 +953,7 @@ retry:
   /* Set "can_retry" when it's possible to rewind the file and try with
    * another "fenc" value.  It's FALSE when no other "fenc" to try, reading
    * stdin or fixed at a specific encoding. */
-  can_retry = (*fenc != NUL && !read_stdin && !keep_dest_enc);
+  can_retry = (*fenc != NUL && !read_stdin && !keep_dest_enc && !read_fifo);
 
   if (!skip_read) {
     linerest = 0;
@@ -978,6 +965,7 @@ retry:
                       && curbuf->b_ffname != NULL
                       && curbuf->b_p_udf
                       && !filtering
+                      && !read_fifo
                       && !read_stdin
                       && !read_buffer);
     if (read_undo_file)
@@ -1038,8 +1026,8 @@ retry:
           size = size / ICONV_MULT;             /* worst case */
 
         if (conv_restlen > 0) {
-          /* Insert unconverted bytes from previous line. */
-          memmove(ptr, conv_rest, conv_restlen);
+          // Insert unconverted bytes from previous line.
+          memmove(ptr, conv_rest, conv_restlen);  // -V614
           ptr += conv_restlen;
           size -= conv_restlen;
         }
@@ -1390,15 +1378,15 @@ retry:
             }
           } else if (fio_flags & FIO_UCS4) {
             if (fio_flags & FIO_ENDIAN_L) {
-              u8c = (*--p << 24);
-              u8c += (*--p << 16);
-              u8c += (*--p << 8);
+              u8c = (unsigned)(*--p) << 24;
+              u8c += (unsigned)(*--p) << 16;
+              u8c += (unsigned)(*--p) << 8;
               u8c += *--p;
             } else {          /* big endian */
               u8c = *--p;
-              u8c += (*--p << 8);
-              u8c += (*--p << 16);
-              u8c += (*--p << 24);
+              u8c += (unsigned)(*--p) << 8;
+              u8c += (unsigned)(*--p) << 16;
+              u8c += (unsigned)(*--p) << 24;
             }
           } else {        /* UTF-8 */
             if (*--p < 0x80)
@@ -1643,21 +1631,19 @@ rewind_retry:
             *ptr = NUL;                         /* end of line */
             len = (colnr_T)(ptr - line_start + 1);
             if (fileformat == EOL_DOS) {
-              if (ptr[-1] == CAR) {             /* remove CR */
+              if (ptr > line_start && ptr[-1] == CAR) {
+                // remove CR before NL
                 ptr[-1] = NUL;
-                --len;
-              }
-              /*
-               * Reading in Dos format, but no CR-LF found!
-               * When 'fileformats' includes "unix", delete all
-               * the lines read so far and start all over again.
-               * Otherwise give an error message later.
-               */
-              else if (ff_error != EOL_DOS) {
-                if (   try_unix
-                       && !read_stdin
-                       && (read_buffer
-                           || lseek(fd, (off_t)0L, SEEK_SET) == 0)) {
+                len--;
+              } else if (ff_error != EOL_DOS) {
+                // Reading in Dos format, but no CR-LF found!
+                // When 'fileformats' includes "unix", delete all
+                // the lines read so far and start all over again.
+                // Otherwise give an error message later.
+                if (try_unix
+                    && !read_stdin
+                    && (read_buffer
+                        || vim_lseek(fd, (off_T)0L, SEEK_SET) == 0)) {
                   fileformat = EOL_UNIX;
                   if (set_options)
                     set_fileformat(EOL_UNIX, OPT_LOCAL);
@@ -1740,22 +1726,25 @@ failed:
   }
 # endif
 
-  if (!read_buffer && !read_stdin)
-    close(fd);                                  /* errors are ignored */
-#ifdef HAVE_FD_CLOEXEC
-  else {
-    int fdflags = fcntl(fd, F_GETFD);
-    if (fdflags >= 0 && (fdflags & FD_CLOEXEC) == 0) {
-      (void)fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC);
-    }
+  if (!read_buffer && !read_stdin) {
+    close(fd);  // errors are ignored
+  } else {
+    (void)os_set_cloexec(fd);
   }
-#endif
   xfree(buffer);
 
   if (read_stdin) {
-    /* Use stderr for stdin, makes shell commands work. */
     close(0);
-    ignored = dup(2);
+#ifndef WIN32
+    // On Unix, use stderr for stdin, makes shell commands work.
+    vim_ignored = dup(2);
+#else
+    // On Windows, use the console input handle for stdin.
+    HANDLE conin = CreateFile("CONIN$", GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ, (LPSECURITY_ATTRIBUTES)NULL,
+                              OPEN_EXISTING, 0, (HANDLE)NULL);
+    vim_ignored = _open_osfhandle(conin, _O_RDONLY);
+#endif
   }
 
   if (tmpname != NULL) {
@@ -1808,8 +1797,8 @@ failed:
     }
 
     if (!filtering && !(flags & READ_DUMMY)) {
-      msg_add_fname(curbuf, sfname);         /* fname in IObuff with quotes */
-      c = FALSE;
+      add_quoted_fname((char *)IObuff, IOSIZE, curbuf, (const char *)sfname);
+      c = false;
 
 #ifdef UNIX
 # ifdef S_ISFIFO
@@ -1850,10 +1839,6 @@ failed:
         STRCAT(IObuff, _("[CR missing]"));
         c = TRUE;
       }
-      if (split) {
-        STRCAT(IObuff, _("[long lines split]"));
-        c = TRUE;
-      }
       if (notconverted) {
         STRCAT(IObuff, _("[NOT converted]"));
         c = TRUE;
@@ -1880,17 +1865,22 @@ failed:
 
       xfree(keep_msg);
       keep_msg = NULL;
+      p = NULL;
       msg_scrolled_ign = TRUE;
-      p = msg_trunc_attr(IObuff, FALSE, 0);
+
+      if (!read_stdin && !read_buffer) {
+        p = msg_trunc_attr(IObuff, FALSE, 0);
+      }
+
       if (read_stdin || read_buffer || restart_edit != 0
-          || (msg_scrolled != 0 && !need_wait_return))
-        /* Need to repeat the message after redrawing when:
-         * - When reading from stdin (the screen will be cleared next).
-         * - When restart_edit is set (otherwise there will be a delay
-         *   before redrawing).
-         * - When the screen was scrolled but there is no wait-return
-         *   prompt. */
+          || (msg_scrolled != 0 && !need_wait_return)) {
+        // Need to repeat the message after redrawing when:
+        // - When reading from stdin (the screen will be cleared next).
+        // - When restart_edit is set (otherwise there will be a delay before
+        //   redrawing).
+        // - When the screen was scrolled but there is no wait-return prompt.
         set_keep_msg(p, 0);
+      }
       msg_scrolled_ign = FALSE;
     }
 
@@ -1953,7 +1943,7 @@ failed:
     u_read_undo(NULL, hash, fname);
   }
 
-  if (!read_stdin && !read_buffer) {
+  if (!read_stdin && !read_fifo && (!read_buffer || sfname != NULL)) {
     int m = msg_scroll;
     int n = msg_scrolled;
 
@@ -1971,7 +1961,7 @@ failed:
     if (filtering) {
       apply_autocmds_exarg(EVENT_FILTERREADPOST, NULL, sfname,
                            false, curbuf, eap);
-    } else if (newfile) {
+    } else if (newfile || (read_buffer && sfname != NULL)) {
       apply_autocmds_exarg(EVENT_BUFREADPOST, NULL, sfname,
                            false, curbuf, eap);
       if (!au_did_filetype && *curbuf->b_p_ft != NUL) {
@@ -2004,7 +1994,7 @@ failed:
 /// Do not accept "/dev/fd/[012]", opening these may hang Vim.
 ///
 /// @param fname file name to check
-static bool is_dev_fd_file(char_u *fname)
+bool is_dev_fd_file(char_u *fname)
   FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT
 {
   return STRNCMP(fname, "/dev/fd/", 8) == 0
@@ -2261,22 +2251,30 @@ buf_write (
   int len;
   linenr_T lnum;
   long nchars;
-  char_u          *errmsg = NULL;
-  int errmsg_allocated = FALSE;
-  char_u          *errnum = NULL;
+#define SET_ERRMSG_NUM(num, msg) \
+  errnum = num, errmsg = msg, errmsgarg = 0
+#define SET_ERRMSG_ARG(msg, error) \
+  errnum = NULL, errmsg = msg, errmsgarg = error
+#define SET_ERRMSG(msg) \
+  errnum = NULL, errmsg = msg, errmsgarg = 0
+  const char *errnum = NULL;
+  char *errmsg = NULL;
+  int errmsgarg = 0;
+  bool errmsg_allocated = false;
   char_u          *buffer;
   char_u smallbuf[SMBUFSIZE];
   char_u          *backup_ext;
   int bufsize;
-  long perm;                                /* file permissions */
+  long perm;                                // file permissions
   int retval = OK;
-  int newfile = FALSE;                      /* TRUE if file doesn't exist yet */
+  int newfile = false;                      // TRUE if file doesn't exist yet
   int msg_save = msg_scroll;
-  int overwriting;                          /* TRUE if writing over original */
-  int no_eol = FALSE;                       /* no end-of-line written */
-  int device = FALSE;                       /* writing to a device */
+  int overwriting;                          // TRUE if writing over original
+  int no_eol = false;                       // no end-of-line written
+  int device = false;                       // writing to a device
   int prev_got_int = got_int;
-  bool file_readonly = false;               /* overwritten file is read-only */
+  int checking_conversion;
+  bool file_readonly = false;               // overwritten file is read-only
   static char     *err_readonly =
     "is read-only (cannot override: \"W\" in 'cpoptions')";
 #if defined(UNIX)
@@ -2285,7 +2283,6 @@ buf_write (
   /* writing everything */
   int whole = (start == 1 && end == buf->b_ml.ml_line_count);
   linenr_T old_line_count = buf->b_ml.ml_line_count;
-  int attr;
   int fileformat;
   int write_bin;
   struct bw_info write_info;            /* info for buf_write_bytes() */
@@ -2395,6 +2392,7 @@ buf_write (
     int did_cmd = FALSE;
     int nofile_err = FALSE;
     int empty_memline = (buf->b_ml.ml_mfp == NULL);
+    bufref_T bufref;
 
     /*
      * Apply PRE autocommands.
@@ -2410,8 +2408,9 @@ buf_write (
     if (fname == buf->b_sfname)
       buf_fname_s = TRUE;
 
-    /* set curwin/curbuf to buf and save a few things */
+    // Set curwin/curbuf to buf and save a few things.
     aucmd_prepbuf(&aco, buf);
+    set_bufref(&bufref, buf);
 
     if (append) {
       if (!(did_cmd = apply_autocmds_exarg(EVENT_FILEAPPENDCMD,
@@ -2459,14 +2458,13 @@ buf_write (
     /* restore curwin/curbuf and a few other things */
     aucmd_restbuf(&aco);
 
-    /*
-     * In three situations we return here and don't write the file:
-     * 1. the autocommands deleted or unloaded the buffer.
-     * 2. The autocommands abort script processing.
-     * 3. If one of the "Cmd" autocommands was executed.
-     */
-    if (!buf_valid(buf))
+    // In three situations we return here and don't write the file:
+    // 1. the autocommands deleted or unloaded the buffer.
+    // 2. The autocommands abort script processing.
+    // 3. If one of the "Cmd" autocommands was executed.
+    if (!bufref_valid(&bufref)) {
       buf = NULL;
+    }
     if (buf == NULL || (buf->b_ml.ml_mfp == NULL && !empty_memline)
         || did_cmd || nofile_err
         || aborting()
@@ -2579,13 +2577,11 @@ buf_write (
     perm = file_info_old.stat.st_mode;
     if (!S_ISREG(file_info_old.stat.st_mode)) {             /* not a file */
       if (S_ISDIR(file_info_old.stat.st_mode)) {
-        errnum = (char_u *)"E502: ";
-        errmsg = (char_u *)_("is a directory");
+        SET_ERRMSG_NUM("E502", _("is a directory"));
         goto fail;
       }
       if (os_nodetype((char *)fname) != NODE_WRITABLE) {
-        errnum = (char_u *)"E503: ";
-        errmsg = (char_u *)_("is not a file or writable device");
+        SET_ERRMSG_NUM("E503", _("is not a file or writable device"));
         goto fail;
       }
       /* It's a device of some kind (or a fifo) which we can write to
@@ -2595,14 +2591,11 @@ buf_write (
       perm = -1;
     }
   }
-#else /* win32 */
-      /*
-       * Check for a writable device name.
-       */
-  c = os_nodetype((char *)fname);
+#else  // win32
+  // Check for a writable device name.
+  c = fname == NULL ? NODE_OTHER : os_nodetype((char *)fname);
   if (c == NODE_OTHER) {
-    errnum = (char_u *)"E503: ";
-    errmsg = (char_u *)_("is not a file or writable device");
+    SET_ERRMSG_NUM("E503", _("is not a file or writable device"));
     goto fail;
   }
   if (c == NODE_WRITABLE) {
@@ -2610,20 +2603,18 @@ buf_write (
     newfile = TRUE;
     perm = -1;
   } else {
-    perm = os_getperm(fname);
-    if (perm < 0)
-      newfile = TRUE;
-    else if (os_isdir(fname)) {
-      errnum = (char_u *)"E502: ";
-      errmsg = (char_u *)_("is a directory");
+    perm = os_getperm((const char *)fname);
+    if (perm < 0) {
+      newfile = true;
+    } else if (os_isdir(fname)) {
+      SET_ERRMSG_NUM("E502", _("is a directory"));
       goto fail;
     }
     if (overwriting) {
       os_fileinfo((char *)fname, &file_info_old);
     }
-
   }
-#endif /* !UNIX */
+#endif  // !UNIX
 
   if (!device && !newfile) {
     /*
@@ -2634,11 +2625,9 @@ buf_write (
 
     if (!forceit && file_readonly) {
       if (vim_strchr(p_cpo, CPO_FWRITE) != NULL) {
-        errnum = (char_u *)"E504: ";
-        errmsg = (char_u *)_(err_readonly);
+        SET_ERRMSG_NUM("E504", _(err_readonly));
       } else {
-        errnum = (char_u *)"E505: ";
-        errmsg = (char_u *)_("is read-only (add ! to override)");
+        SET_ERRMSG_NUM("E505", _("is read-only (add ! to override)"));
       }
       goto fail;
     }
@@ -2874,9 +2863,9 @@ buf_write (
             xfree(backup);
             backup = NULL;
           } else {
-            /* set file protection same as original file, but
-             * strip s-bit */
-            (void)os_setperm(backup, perm & 0777);
+            // set file protection same as original file, but
+            // strip s-bit.
+            (void)os_setperm((const char *)backup, perm & 0777);
 
 #ifdef UNIX
             /*
@@ -2887,7 +2876,8 @@ buf_write (
              */
             if (file_info_new.stat.st_gid != file_info_old.stat.st_gid
                 && os_fchown(bfd, -1, file_info_old.stat.st_gid) != 0) {
-              os_setperm(backup, (perm & 0707) | ((perm & 07) << 3));
+              os_setperm((const char *)backup,
+                         (perm & 0707) | ((perm & 07) << 3));
             }
 # ifdef HAVE_SELINUX
             mch_copy_sec(fname, backup);
@@ -2905,23 +2895,27 @@ buf_write (
             while ((write_info.bw_len = read_eintr(fd, copybuf,
                         BUFSIZE)) > 0) {
               if (buf_write_bytes(&write_info) == FAIL) {
-                errmsg = (char_u *)_(
-                    "E506: Can't write to backup file (add ! to override)");
+                SET_ERRMSG(_(
+                    "E506: Can't write to backup file (add ! to override)"));
                 break;
               }
               os_breakcheck();
               if (got_int) {
-                errmsg = (char_u *)_(e_interr);
+                SET_ERRMSG(_(e_interr));
                 break;
               }
             }
 
-            if (close(bfd) < 0 && errmsg == NULL)
-              errmsg = (char_u *)_(
-                  "E507: Close error for backup file (add ! to override)");
-            if (write_info.bw_len < 0)
-              errmsg = (char_u *)_(
-                  "E508: Can't read file for backup (add ! to override)");
+            int error;
+            if ((error = os_close(bfd)) != 0 && errmsg == NULL) {
+              SET_ERRMSG_ARG(_("E507: Close error for backup file "
+                               "(add ! to override): %s"),
+                             error);
+            }
+            if (write_info.bw_len < 0) {
+              SET_ERRMSG(_(
+                  "E508: Can't read file for backup (add ! to override)"));
+            }
 #ifdef UNIX
             set_file_time(backup,
                           file_info_old.stat.st_atim.tv_sec,
@@ -2938,18 +2932,19 @@ buf_write (
         }
       }
 nobackup:
-      close(fd);                /* ignore errors for closing read file */
+      os_close(fd);  // Ignore errors for closing read file.
       xfree(copybuf);
 
-      if (backup == NULL && errmsg == NULL)
-        errmsg = (char_u *)_(
-            "E509: Cannot create backup file (add ! to override)");
-      /* ignore errors when forceit is TRUE */
+      if (backup == NULL && errmsg == NULL) {
+        SET_ERRMSG(_(
+            "E509: Cannot create backup file (add ! to override)"));
+      }
+      // Ignore errors when forceit is TRUE.
       if ((some_error || errmsg != NULL) && !forceit) {
         retval = FAIL;
         goto fail;
       }
-      errmsg = NULL;
+      SET_ERRMSG(NULL);
     } else {
       char_u      *dirp;
       char_u      *p;
@@ -2964,8 +2959,7 @@ nobackup:
        * anyway, thus we need an extra check here.
        */
       if (file_readonly && vim_strchr(p_cpo, CPO_FWRITE) != NULL) {
-        errnum = (char_u *)"E504: ";
-        errmsg = (char_u *)_(err_readonly);
+        SET_ERRMSG_NUM("E504", _(err_readonly));
         goto fail;
       }
 
@@ -3029,7 +3023,7 @@ nobackup:
         }
       }
       if (backup == NULL && !forceit) {
-        errmsg = (char_u *)_("E510: Can't make backup file (add ! to override)");
+        SET_ERRMSG(_("E510: Can't make backup file (add ! to override)"));
         goto fail;
       }
     }
@@ -3041,8 +3035,8 @@ nobackup:
       && file_info_old.stat.st_uid == getuid()
       && vim_strchr(p_cpo, CPO_FWRITE) == NULL) {
     perm |= 0200;
-    (void)os_setperm(fname, perm);
-    made_writable = TRUE;
+    (void)os_setperm((const char *)fname, perm);
+    made_writable = true;
   }
 #endif
 
@@ -3068,9 +3062,9 @@ nobackup:
    */
   if (reset_changed && !newfile && overwriting
       && !(exiting && backup != NULL)) {
-    ml_preserve(buf, FALSE);
+    ml_preserve(buf, false, !!p_fs);
     if (got_int) {
-      errmsg = (char_u *)_(e_interr);
+      SET_ERRMSG(_(e_interr));
       goto restore_backup;
     }
   }
@@ -3141,8 +3135,8 @@ nobackup:
      */
     if (*p_ccv != NUL) {
       wfname = vim_tempname();
-      if (wfname == NULL) {             /* Can't write without a tempfile! */
-        errmsg = (char_u *)_("E214: Can't find temp file for writing");
+      if (wfname == NULL) {  // Can't write without a tempfile!
+        SET_ERRMSG(_("E214: Can't find temp file for writing"));
         goto restore_backup;
       }
     }
@@ -3154,362 +3148,399 @@ nobackup:
       && wfname == fname
       ) {
     if (!forceit) {
-      errmsg = (char_u *)_(
-          "E213: Cannot convert (add ! to write without conversion)");
+      SET_ERRMSG(_(
+          "E213: Cannot convert (add ! to write without conversion)"));
       goto restore_backup;
     }
     notconverted = TRUE;
   }
 
-  /*
-   * Open the file "wfname" for writing.
-   * We may try to open the file twice: If we can't write to the
-   * file and forceit is TRUE we delete the existing file and try to create
-   * a new one. If this still fails we may have lost the original file!
-   * (this may happen when the user reached his quotum for number of files).
-   * Appending will fail if the file does not exist and forceit is FALSE.
-   */
-  while ((fd = os_open((char *)wfname, O_WRONLY | (append
-                                                              ? (forceit ? (
-                                                                   O_APPEND |
-                                                                   O_CREAT) :
-                                                                 O_APPEND)
-                                                              : (O_CREAT |
-                                                                 O_TRUNC))
-              , perm < 0 ? 0666 : (perm & 0777))) < 0) {
-    /*
-     * A forced write will try to create a new file if the old one is
-     * still readonly. This may also happen when the directory is
-     * read-only. In that case the os_remove() will fail.
-     */
-    if (errmsg == NULL) {
-#ifdef UNIX
-      FileInfo file_info;
+  // If conversion is taking place, we may first pretend to write and check
+  // for conversion errors.  Then loop again to write for real.
+  // When not doing conversion this writes for real right away.
+  for (checking_conversion = true; ; checking_conversion = false) {
+    // There is no need to check conversion when:
+    // - there is no conversion
+    // - we make a backup file, that can be restored in case of conversion
+    // failure.
+    if (!converted || dobackup) {
+      checking_conversion = false;
+    }
 
-      /* Don't delete the file when it's a hard or symbolic link. */
-      if ((!newfile && os_fileinfo_hardlinks(&file_info) > 1)
-          || (os_fileinfo_link((char *)fname, &file_info)
-              && !os_fileinfo_id_equal(&file_info, &file_info_old))) {
-        errmsg = (char_u *)_("E166: Can't open linked file for writing");
-      } else
-#endif
-      {
-        errmsg = (char_u *)_("E212: Can't open file for writing");
-        if (forceit && vim_strchr(p_cpo, CPO_FWRITE) == NULL
-            && perm >= 0) {
+    if (checking_conversion) {
+      // Make sure we don't write anything.
+      fd = -1;
+      write_info.bw_fd = fd;
+    } else {
+      // Open the file "wfname" for writing.
+      // We may try to open the file twice: If we can't write to the file
+      // and forceit is TRUE we delete the existing file and try to
+      // create a new one. If this still fails we may have lost the
+      // original file!  (this may happen when the user reached his
+      // quotum for number of files).
+      // Appending will fail if the file does not exist and forceit is
+      // FALSE.
+      while ((fd = os_open((char *)wfname,
+                           O_WRONLY |
+                           (append ?
+                            (forceit ? (O_APPEND | O_CREAT) : O_APPEND)
+                            : (O_CREAT | O_TRUNC))
+                           , perm < 0 ? 0666 : (perm & 0777))) < 0) {
+        // A forced write will try to create a new file if the old one
+        // is still readonly. This may also happen when the directory
+        // is read-only. In that case the mch_remove() will fail.
+        if (errmsg == NULL) {
 #ifdef UNIX
-          /* we write to the file, thus it should be marked
-             writable after all */
-          if (!(perm & 0200))
-            made_writable = TRUE;
-          perm |= 0200;
-          if (file_info_old.stat.st_uid != getuid()
-              || file_info_old.stat.st_gid != getgid()) {
-            perm &= 0777;
+          FileInfo file_info;
+
+          // Don't delete the file when it's a hard or symbolic link.
+          if ((!newfile && os_fileinfo_hardlinks(&file_info_old) > 1)
+              || (os_fileinfo_link((char *)fname, &file_info)
+                  && !os_fileinfo_id_equal(&file_info, &file_info_old))) {
+            SET_ERRMSG(_("E166: Can't open linked file for writing"));
+          } else {
+#endif
+            SET_ERRMSG_ARG(_("E212: Can't open file for writing: %s"), fd);
+            if (forceit && vim_strchr(p_cpo, CPO_FWRITE) == NULL
+                && perm >= 0) {
+#ifdef UNIX
+              // we write to the file, thus it should be marked
+              // writable after all
+              if (!(perm & 0200)) {
+                made_writable = true;
+              }
+              perm |= 0200;
+              if (file_info_old.stat.st_uid != getuid()
+                  || file_info_old.stat.st_gid != getgid()) {
+                perm &= 0777;
+              }
+#endif
+              if (!append) {                    // don't remove when appending
+                os_remove((char *)wfname);
+              }
+              continue;
+            }
+#ifdef UNIX
           }
 #endif
-          if (!append)                      /* don't remove when appending */
-            os_remove((char *)wfname);
-          continue;
         }
-      }
-    }
 
 restore_backup:
-    {
-      /*
-       * If we failed to open the file, we don't need a backup. Throw it
-       * away.  If we moved or removed the original file try to put the
-       * backup in its place.
-       */
-      if (backup != NULL && wfname == fname) {
-        if (backup_copy) {
-          /*
-           * There is a small chance that we removed the original,
-           * try to move the copy in its place.
-           * This may not work if the vim_rename() fails.
-           * In that case we leave the copy around.
-           */
-          // If file does not exist, put the copy in its place
-          if (!os_path_exists(fname)) {
-            vim_rename(backup, fname);
+        {
+          // If we failed to open the file, we don't need a backup. Throw it
+          // away.  If we moved or removed the original file try to put the
+          // backup in its place.
+          if (backup != NULL && wfname == fname) {
+            if (backup_copy) {
+              // There is a small chance that we removed the original,
+              // try to move the copy in its place.
+              // This may not work if the vim_rename() fails.
+              // In that case we leave the copy around.
+              // If file does not exist, put the copy in its place
+              if (!os_path_exists(fname)) {
+                vim_rename(backup, fname);
+              }
+              // if original file does exist throw away the copy
+              if (os_path_exists(fname)) {
+                os_remove((char *)backup);
+              }
+            } else {
+              // try to put the original file back
+              vim_rename(backup, fname);
+            }
           }
-          // if original file does exist throw away the copy
-          if (os_path_exists(fname)) {
-            os_remove((char *)backup);
+
+          // if original file no longer exists give an extra warning
+          if (!newfile && !os_path_exists(fname)) {
+            end = 0;
           }
+        }
+
+        if (wfname != fname) {
+          xfree(wfname);
+        }
+        goto fail;
+      }
+      write_info.bw_fd = fd;
+    }
+    SET_ERRMSG(NULL);
+
+    write_info.bw_buf = buffer;
+    nchars = 0;
+
+    // use "++bin", "++nobin" or 'binary'
+    if (eap != NULL && eap->force_bin != 0) {
+      write_bin = (eap->force_bin == FORCE_BIN);
+    } else {
+      write_bin = buf->b_p_bin;
+    }
+
+    // Skip the BOM when appending and the file already existed, the BOM
+    // only makes sense at the start of the file.
+    if (buf->b_p_bomb && !write_bin && (!append || perm < 0)) {
+      write_info.bw_len = make_bom(buffer, fenc);
+      if (write_info.bw_len > 0) {
+        // don't convert
+        write_info.bw_flags = FIO_NOCONVERT | wb_flags;
+        if (buf_write_bytes(&write_info) == FAIL) {
+          end = 0;
         } else {
-          /* try to put the original file back */
-          vim_rename(backup, fname);
+          nchars += write_info.bw_len;
         }
       }
+    }
+    write_info.bw_start_lnum = start;
 
-      // if original file no longer exists give an extra warning
-      if (!newfile && !os_path_exists(fname)) {
-        end = 0;
-      }
+    write_undo_file = (buf->b_p_udf && overwriting && !append
+                       && !filtering && reset_changed && !checking_conversion);
+    if (write_undo_file) {
+      // Prepare for computing the hash value of the text.
+      sha256_start(&sha_ctx);
     }
 
-    if (wfname != fname)
-      xfree(wfname);
-    goto fail;
-  }
-  errmsg = NULL;
-
-
-  write_info.bw_fd = fd;
-  write_info.bw_buf = buffer;
-  nchars = 0;
-
-  /* use "++bin", "++nobin" or 'binary' */
-  if (eap != NULL && eap->force_bin != 0)
-    write_bin = (eap->force_bin == FORCE_BIN);
-  else
-    write_bin = buf->b_p_bin;
-
-  /*
-   * Skip the BOM when appending and the file already existed, the BOM 
-   * only makes sense at the start of the file.
-   */
-  if (buf->b_p_bomb && !write_bin && (!append || perm < 0)) {
-    write_info.bw_len = make_bom(buffer, fenc);
-    if (write_info.bw_len > 0) {
-      /* don't convert */
-      write_info.bw_flags = FIO_NOCONVERT | wb_flags;
-      if (buf_write_bytes(&write_info) == FAIL)
-        end = 0;
-      else
-        nchars += write_info.bw_len;
-    }
-  }
-  write_info.bw_start_lnum = start;
-
-  write_undo_file = (buf->b_p_udf && overwriting && !append
-                     && !filtering && reset_changed);
-  if (write_undo_file)
-    /* Prepare for computing the hash value of the text. */
-    sha256_start(&sha_ctx);
-
-  write_info.bw_len = bufsize;
+    write_info.bw_len = bufsize;
 #ifdef HAS_BW_FLAGS
-  write_info.bw_flags = wb_flags;
+    write_info.bw_flags = wb_flags;
 #endif
-  fileformat = get_fileformat_force(buf, eap);
-  s = buffer;
-  len = 0;
-  for (lnum = start; lnum <= end; ++lnum) {
-    /*
-     * The next while loop is done once for each character written.
-     * Keep it fast!
-     */
-    ptr = ml_get_buf(buf, lnum, FALSE) - 1;
-    if (write_undo_file)
-      sha256_update(&sha_ctx, ptr + 1, (uint32_t)(STRLEN(ptr + 1) + 1));
-    while ((c = *++ptr) != NUL) {
-      if (c == NL)
-        *s = NUL;                       /* replace newlines with NULs */
-      else if (c == CAR && fileformat == EOL_MAC)
-        *s = NL;                        /* Mac: replace CRs with NLs */
-      else
-        *s = c;
-      ++s;
-      if (++len != bufsize)
-        continue;
-      if (buf_write_bytes(&write_info) == FAIL) {
-        end = 0;                        /* write error: break loop */
-        break;
+    fileformat = get_fileformat_force(buf, eap);
+    s = buffer;
+    len = 0;
+    for (lnum = start; lnum <= end; lnum++) {
+      // The next while loop is done once for each character written.
+      // Keep it fast!
+      ptr = ml_get_buf(buf, lnum, false) - 1;
+      if (write_undo_file) {
+        sha256_update(&sha_ctx, ptr + 1, (uint32_t)(STRLEN(ptr + 1) + 1));
       }
-      nchars += bufsize;
-      s = buffer;
-      len = 0;
-      write_info.bw_start_lnum = lnum;
-    }
-    /* write failed or last line has no EOL: stop here */
-    if (end == 0
-        || (lnum == end
-            && (write_bin || !buf->b_p_fixeol)
-            && (lnum == buf->b_no_eol_lnum
-                || (lnum == buf->b_ml.ml_line_count && !buf->b_p_eol)))) {
-      ++lnum;                           /* written the line, count it */
-      no_eol = TRUE;
-      break;
-    }
-    if (fileformat == EOL_UNIX)
-      *s++ = NL;
-    else {
-      *s++ = CAR;                       /* EOL_MAC or EOL_DOS: write CR */
-      if (fileformat == EOL_DOS) {      /* write CR-NL */
-        if (++len == bufsize) {
-          if (buf_write_bytes(&write_info) == FAIL) {
-            end = 0;                    /* write error: break loop */
-            break;
-          }
-          nchars += bufsize;
-          s = buffer;
-          len = 0;
+      while ((c = *++ptr) != NUL) {
+        if (c == NL) {
+          *s = NUL;                       // replace newlines with NULs
+        } else if (c == CAR && fileformat == EOL_MAC) {
+          *s = NL;                        // Mac: replace CRs with NLs
+        } else {
+          *s = c;
         }
+        s++;
+        if (++len != bufsize) {
+          continue;
+        }
+        if (buf_write_bytes(&write_info) == FAIL) {
+          end = 0;                        // write error: break loop
+          break;
+        }
+        nchars += bufsize;
+        s = buffer;
+        len = 0;
+        write_info.bw_start_lnum = lnum;
+      }
+      // write failed or last line has no EOL: stop here
+      if (end == 0
+          || (lnum == end
+              && (write_bin || !buf->b_p_fixeol)
+              && (lnum == buf->b_no_eol_lnum
+                  || (lnum == buf->b_ml.ml_line_count && !buf->b_p_eol)))) {
+        lnum++;                           // written the line, count it
+        no_eol = true;
+        break;
+      }
+      if (fileformat == EOL_UNIX) {
         *s++ = NL;
+      } else {
+        *s++ = CAR;                       // EOL_MAC or EOL_DOS: write CR
+        if (fileformat == EOL_DOS) {      // write CR-NL
+          if (++len == bufsize) {
+            if (buf_write_bytes(&write_info) == FAIL) {
+              end = 0;                    // write error: break loop
+              break;
+            }
+            nchars += bufsize;
+            s = buffer;
+            len = 0;
+          }
+          *s++ = NL;
+        }
+      }
+      if (++len == bufsize) {
+        if (buf_write_bytes(&write_info) == FAIL) {
+          end = 0;  // Write error: break loop.
+          break;
+        }
+        nchars += bufsize;
+        s = buffer;
+        len = 0;
+
+        os_breakcheck();
+        if (got_int) {
+          end = 0;  // Interrupted, break loop.
+          break;
+        }
       }
     }
-    if (++len == bufsize && end) {
+    if (len > 0 && end > 0) {
+      write_info.bw_len = len;
       if (buf_write_bytes(&write_info) == FAIL) {
-        end = 0;                        /* write error: break loop */
-        break;
+        end = 0;                      // write error
       }
-      nchars += bufsize;
-      s = buffer;
-      len = 0;
-
-      os_breakcheck();
-      if (got_int) {
-        end = 0;                        /* Interrupted, break loop */
-        break;
-      }
+      nchars += len;
     }
-  }
-  if (len > 0 && end > 0) {
-    write_info.bw_len = len;
-    if (buf_write_bytes(&write_info) == FAIL)
-      end = 0;                      /* write error */
-    nchars += len;
+
+    // Stop when writing done or an error was encountered.
+    if (!checking_conversion || end == 0) {
+        break;
+    }
+
+    // If no error happened until now, writing should be ok, so loop to
+    // really write the buffer.
   }
 
-#if defined(UNIX)
-  // On many journalling file systems there is a bug that causes both the
-  // original and the backup file to be lost when halting the system right
-  // after writing the file.  That's because only the meta-data is
-  // journalled.  Syncing the file slows down the system, but assures it has
-  // been written to disk and we don't lose it.
-  // For a device do try the fsync() but don't complain if it does not work
-  // (could be a pipe).
-  // If the 'fsync' option is FALSE, don't fsync().  Useful for laptops.
-  if (p_fs && os_fsync(fd) != 0 && !device) {
-    errmsg = (char_u *)_("E667: Fsync failed");
-    end = 0;
-  }
-#endif
+  // If we started writing, finish writing. Also when an error was
+  // encountered.
+  if (!checking_conversion) {
+    // On many journalling file systems there is a bug that causes both the
+    // original and the backup file to be lost when halting the system right
+    // after writing the file.  That's because only the meta-data is
+    // journalled.  Syncing the file slows down the system, but assures it has
+    // been written to disk and we don't lose it.
+    // For a device do try the fsync() but don't complain if it does not work
+    // (could be a pipe).
+    // If the 'fsync' option is FALSE, don't fsync().  Useful for laptops.
+    int error;
+    if (p_fs && (error = os_fsync(fd)) != 0 && !device) {
+      SET_ERRMSG_ARG(_("E667: Fsync failed: %s"), error);
+      end = 0;
+    }
 
 #ifdef HAVE_SELINUX
-  /* Probably need to set the security context. */
-  if (!backup_copy)
-    mch_copy_sec(backup, wfname);
-#endif
-
-#ifdef UNIX
-  /* When creating a new file, set its owner/group to that of the original
-   * file.  Get the new device and inode number. */
-  if (backup != NULL && !backup_copy) {
-    /* don't change the owner when it's already OK, some systems remove
-     * permission or ACL stuff */
-    FileInfo file_info;
-    if (!os_fileinfo((char *)wfname, &file_info)
-        || file_info.stat.st_uid != file_info_old.stat.st_uid
-        || file_info.stat.st_gid != file_info_old.stat.st_gid) {
-      os_fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
-      if (perm >= 0)            /* set permission again, may have changed */
-        (void)os_setperm(wfname, perm);
+    // Probably need to set the security context.
+    if (!backup_copy) {
+      mch_copy_sec(backup, wfname);
     }
-    buf_set_file_id(buf);
-  } else if (!buf->file_id_valid) {
-    // Set the file_id when creating a new file.
-    buf_set_file_id(buf);
-  }
 #endif
-
-  if (close(fd) != 0) {
-    errmsg = (char_u *)_("E512: Close failed");
-    end = 0;
-  }
 
 #ifdef UNIX
-  if (made_writable)
-    perm &= ~0200;              /* reset 'w' bit for security reasons */
-#endif
-  if (perm >= 0)                /* set perm. of new file same as old file */
-    (void)os_setperm(wfname, perm);
-#ifdef HAVE_ACL
-  /* Probably need to set the ACL before changing the user (can't set the
-   * ACL on a file the user doesn't own). */
-  if (!backup_copy)
-    mch_set_acl(wfname, acl);
-#endif
-
-  if (wfname != fname) {
-    /*
-     * The file was written to a temp file, now it needs to be converted
-     * with 'charconvert' to (overwrite) the output file.
-     */
-    if (end != 0) {
-      if (eval_charconvert(enc_utf8 ? "utf-8" : (char *) p_enc, (char *) fenc,
-                           (char *) wfname, (char *) fname) == FAIL) {
-        write_info.bw_conv_error = true;
-        end = 0;
+    // When creating a new file, set its owner/group to that of the original
+    // file.  Get the new device and inode number.
+    if (backup != NULL && !backup_copy) {
+      // don't change the owner when it's already OK, some systems remove
+      // permission or ACL stuff
+      FileInfo file_info;
+      if (!os_fileinfo((char *)wfname, &file_info)
+          || file_info.stat.st_uid != file_info_old.stat.st_uid
+          || file_info.stat.st_gid != file_info_old.stat.st_gid) {
+        os_fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
+        if (perm >= 0) {  // Set permission again, may have changed.
+          (void)os_setperm((const char *)wfname, perm);
+        }
       }
+      buf_set_file_id(buf);
+    } else if (!buf->file_id_valid) {
+      // Set the file_id when creating a new file.
+      buf_set_file_id(buf);
     }
-    os_remove((char *)wfname);
-    xfree(wfname);
+#endif
+
+    if ((error = os_close(fd)) != 0) {
+      SET_ERRMSG_ARG(_("E512: Close failed: %s"), error);
+      end = 0;
+    }
+
+#ifdef UNIX
+    if (made_writable) {
+      perm &= ~0200;              // reset 'w' bit for security reasons
+    }
+#endif
+    if (perm >= 0) {  // Set perm. of new file same as old file.
+      (void)os_setperm((const char *)wfname, perm);
+    }
+#ifdef HAVE_ACL
+    // Probably need to set the ACL before changing the user (can't set the
+    // ACL on a file the user doesn't own).
+    if (!backup_copy) {
+      mch_set_acl(wfname, acl);
+    }
+#endif
+
+    if (wfname != fname) {
+      // The file was written to a temp file, now it needs to be converted
+      // with 'charconvert' to (overwrite) the output file.
+      if (end != 0) {
+        if (eval_charconvert(enc_utf8 ? "utf-8" : (char *)p_enc, (char *)fenc,
+                             (char *)wfname, (char *)fname) == FAIL) {
+          write_info.bw_conv_error = true;
+          end = 0;
+        }
+      }
+      os_remove((char *)wfname);
+      xfree(wfname);
+    }
   }
 
   if (end == 0) {
+    // Error encountered.
     if (errmsg == NULL) {
       if (write_info.bw_conv_error) {
-        if (write_info.bw_conv_error_lnum == 0)
-          errmsg = (char_u *)_(
-              "E513: write error, conversion failed (make 'fenc' empty to override)");
-        else {
-          errmsg_allocated = TRUE;
-          errmsg = xmalloc(300);
-          vim_snprintf((char *)errmsg, 300,
-              _("E513: write error, conversion failed in line %" PRId64
+        if (write_info.bw_conv_error_lnum == 0) {
+          SET_ERRMSG(_(
+              "E513: write error, conversion failed "
+              "(make 'fenc' empty to override)"));
+        } else {
+          errmsg_allocated = true;
+          SET_ERRMSG(xmalloc(300));
+          vim_snprintf(
+              errmsg, 300,
+              _("E513: write error, conversion failed in line %" PRIdLINENR
                 " (make 'fenc' empty to override)"),
-              (int64_t)write_info.bw_conv_error_lnum);
+              write_info.bw_conv_error_lnum);
         }
-      } else if (got_int)
-        errmsg = (char_u *)_(e_interr);
-      else
-        errmsg = (char_u *)_("E514: write error (file system full?)");
+      } else if (got_int) {
+        SET_ERRMSG(_(e_interr));
+      } else {
+        SET_ERRMSG(_("E514: write error (file system full?)"));
+      }
     }
 
-    /*
-     * If we have a backup file, try to put it in place of the new file,
-     * because the new file is probably corrupt.  This avoids losing the
-     * original file when trying to make a backup when writing the file a
-     * second time.
-     * When "backup_copy" is set we need to copy the backup over the new
-     * file.  Otherwise rename the backup file.
-     * If this is OK, don't give the extra warning message.
-     */
+    // If we have a backup file, try to put it in place of the new file,
+    // because the new file is probably corrupt.  This avoids losing the
+    // original file when trying to make a backup when writing the file a
+    // second time.
+    // When "backup_copy" is set we need to copy the backup over the new
+    // file.  Otherwise rename the backup file.
+    // If this is OK, don't give the extra warning message.
     if (backup != NULL) {
       if (backup_copy) {
-        /* This may take a while, if we were interrupted let the user
-         * know we got the message. */
+        // This may take a while, if we were interrupted let the user
+        // know we got the message.
         if (got_int) {
           MSG(_(e_interr));
           ui_flush();
         }
         if ((fd = os_open((char *)backup, O_RDONLY, 0)) >= 0) {
           if ((write_info.bw_fd = os_open((char *)fname,
-                   O_WRONLY | O_CREAT | O_TRUNC,
-                   perm & 0777)) >= 0) {
-            /* copy the file. */
+                                          O_WRONLY | O_CREAT | O_TRUNC,
+                                          perm & 0777)) >= 0) {
+            // copy the file.
             write_info.bw_buf = smallbuf;
 #ifdef HAS_BW_FLAGS
             write_info.bw_flags = FIO_NOCONVERT;
 #endif
             while ((write_info.bw_len = read_eintr(fd, smallbuf,
-                        SMBUFSIZE)) > 0)
-              if (buf_write_bytes(&write_info) == FAIL)
+                                                   SMBUFSIZE)) > 0) {
+              if (buf_write_bytes(&write_info) == FAIL) {
                 break;
+              }
+            }
 
             if (close(write_info.bw_fd) >= 0
-                && write_info.bw_len == 0)
-              end = 1;                          /* success */
+                && write_info.bw_len == 0) {
+              end = 1;                          // success
+            }
           }
-          close(fd);            /* ignore errors for closing read file */
+          close(fd);            // ignore errors for closing read file
         }
       } else {
-        if (vim_rename(backup, fname) == 0)
+        if (vim_rename(backup, fname) == 0) {
           end = 1;
+        }
       }
     }
     goto fail;
@@ -3522,8 +3553,8 @@ restore_backup:
   fname = sfname;           /* use shortname now, for the messages */
 #endif
   if (!filtering) {
-    msg_add_fname(buf, fname);          /* put fname in IObuff with quotes */
-    c = FALSE;
+    add_quoted_fname((char *)IObuff, IOSIZE, buf, (const char *)fname);
+    c = false;
     if (write_info.bw_conv_error) {
       STRCAT(IObuff, _(" CONVERSION ERROR"));
       c = TRUE;
@@ -3566,14 +3597,13 @@ restore_backup:
    * writing to the original file and '+' is not in 'cpoptions'. */
   if (reset_changed && whole && !append
       && !write_info.bw_conv_error
-      && (overwriting || vim_strchr(p_cpo, CPO_PLUS) != NULL)
-      ) {
-    unchanged(buf, TRUE);
-    /* buf->b_changedtick is always incremented in unchanged() but that
-     * should not trigger a TextChanged event. */
-    if (last_changedtick + 1 == buf->b_changedtick
-        && last_changedtick_buf == buf) {
-      last_changedtick = buf->b_changedtick;
+      && (overwriting || vim_strchr(p_cpo, CPO_PLUS) != NULL)) {
+    unchanged(buf, true);
+    const varnumber_T changedtick = buf_get_changedtick(buf);
+    if (buf->b_last_changedtick + 1 == changedtick) {
+      // changedtick is always incremented in unchanged() but that
+      // should not trigger a TextChanged event.
+      buf->b_last_changedtick = changedtick;
     }
     u_unchanged(buf);
     u_update_save_nr(buf);
@@ -3632,7 +3662,7 @@ restore_backup:
         close(empty_fd);
     }
     if (org != NULL) {
-      os_setperm((char_u *)org, os_getperm(fname) & 0777);
+      os_setperm(org, os_getperm((const char *)fname) & 0777);
       xfree(org);
     }
   }
@@ -3672,33 +3702,32 @@ nofail:
 #endif
 
   if (errmsg != NULL) {
-    int numlen = errnum != NULL ? (int)STRLEN(errnum) : 0;
-
-    attr = hl_attr(HLF_E);      /* set highlight for error messages */
-    msg_add_fname(buf,
+    // - 100 to save some space for further error message
 #ifndef UNIX
-        sfname
+    add_quoted_fname((char *)IObuff, IOSIZE - 100, buf, (const char *)sfname);
 #else
-        fname
+    add_quoted_fname((char *)IObuff, IOSIZE - 100, buf, (const char *)fname);
 #endif
-        );                      /* put file name in IObuff with quotes */
-    if (STRLEN(IObuff) + STRLEN(errmsg) + numlen >= IOSIZE)
-      IObuff[IOSIZE - STRLEN(errmsg) - numlen - 1] = NUL;
-    /* If the error message has the form "is ...", put the error number in
-     * front of the file name. */
     if (errnum != NULL) {
-      STRMOVE(IObuff + numlen, IObuff);
-      memmove(IObuff, errnum, (size_t)numlen);
+      if (errmsgarg != 0) {
+        emsgf("%s: %s%s: %s", errnum, IObuff, errmsg, os_strerror(errmsgarg));
+      } else {
+        emsgf("%s: %s%s", errnum, IObuff, errmsg);
+      }
+    } else if (errmsgarg != 0) {
+      emsgf(errmsg, os_strerror(errmsgarg));
+    } else {
+      EMSG(errmsg);
     }
-    STRCAT(IObuff, errmsg);
-    emsg(IObuff);
-    if (errmsg_allocated)
+    if (errmsg_allocated) {
       xfree(errmsg);
+    }
 
     retval = FAIL;
     if (end == 0) {
+      const int attr = HL_ATTR(HLF_E);  // Set highlight for error messages.
       MSG_PUTS_ATTR(_("\nWARNING: Original file may be lost or damaged\n"),
-          attr | MSG_HIST);
+                    attr | MSG_HIST);
       MSG_PUTS_ATTR(_(
               "don't quit the editor until the file is successfully written!"),
           attr | MSG_HIST);
@@ -3758,6 +3787,9 @@ nofail:
   got_int |= prev_got_int;
 
   return retval;
+#undef SET_ERRMSG
+#undef SET_ERRMSG_ARG
+#undef SET_ERRMSG_NUM
 }
 
 /*
@@ -3801,16 +3833,25 @@ static int set_rw_fname(char_u *fname, char_u *sfname)
   return OK;
 }
 
-/*
- * Put file name into IObuff with quotes.
- */
-void msg_add_fname(buf_T *buf, char_u *fname)
+/// Put file name into the specified buffer with quotes
+///
+/// Replaces home directory at the start with `~`.
+///
+/// @param[out]  ret_buf  Buffer to save results to.
+/// @param[in]  buf_len  ret_buf length.
+/// @param[in]  buf  buf_T file name is coming from.
+/// @param[in]  fname  File name to write.
+static void add_quoted_fname(char *const ret_buf, const size_t buf_len,
+                             const buf_T *const buf, const char *fname)
+  FUNC_ATTR_NONNULL_ARG(1)
 {
-  if (fname == NULL)
-    fname = (char_u *)"-stdin-";
-  home_replace(buf, fname, IObuff + 1, IOSIZE - 4, TRUE);
-  IObuff[0] = '"';
-  STRCAT(IObuff, "\" ");
+  if (fname == NULL) {
+    fname = "-stdin-";
+  }
+  ret_buf[0] = '"';
+  home_replace(buf, (const char_u *)fname, (char_u *)ret_buf + 1,
+               (int)buf_len - 4, true);
+  xstrlcat(ret_buf, "\" ", buf_len);
 }
 
 /// Append message for text mode to IObuff.
@@ -3842,7 +3883,7 @@ static bool msg_add_fileformat(int eol_type)
 /*
  * Append line and character count to IObuff.
  */
-void msg_add_lines(int insert_space, long lnum, off_t nchars)
+void msg_add_lines(int insert_space, long lnum, off_T nchars)
 {
   char_u  *p;
 
@@ -3887,15 +3928,15 @@ static int check_mtime(buf_T *buf, FileInfo *file_info)
   if (buf->b_mtime_read != 0
       && time_differs(file_info->stat.st_mtim.tv_sec,
                       buf->b_mtime_read)) {
-    msg_scroll = TRUE;              /* don't overwrite messages here */
-    msg_silent = 0;                 /* must give this prompt */
-    /* don't use emsg() here, don't want to flush the buffers */
-    MSG_ATTR(_("WARNING: The file has been changed since reading it!!!"),
-        hl_attr(HLF_E));
-    if (ask_yesno((char_u *)_("Do you really want to write to it"),
-            TRUE) == 'n')
+    msg_scroll = true;  // Don't overwrite messages here.
+    msg_silent = 0;     // Must give this prompt.
+    // Don't use emsg() here, don't want to flush the buffers.
+    msg_attr(_("WARNING: The file has been changed since reading it!!!"),
+             HL_ATTR(HLF_E));
+    if (ask_yesno(_("Do you really want to write to it"), true) == 'n') {
       return FAIL;
-    msg_scroll = FALSE;             /* always overwrite the file message now */
+    }
+    msg_scroll = false;  // Always overwrite the file message now.
   }
   return OK;
 }
@@ -4089,6 +4130,10 @@ static int buf_write_bytes(struct bw_info *ip)
 # endif
   }
 
+  if (ip->bw_fd < 0) {
+    // Only checking conversion, which is OK if we get here.
+    return OK;
+  }
   wlen = write_eintr(ip->bw_fd, buf, len);
   return (wlen < len) ? FAIL : OK;
 }
@@ -4301,38 +4346,46 @@ static int make_bom(char_u *buf, char_u *name)
   return (int)(p - buf);
 }
 
+/// Shorten filename of a buffer.
+/// When "force" is TRUE: Use full path from now on for files currently being
+/// edited, both for file name and swap file name.  Try to shorten the file
+/// names a bit, if safe to do so.
+/// When "force" is FALSE: Only try to shorten absolute file names.
+/// For buffers that have buftype "nofile" or "scratch": never change the file
+/// name.
+void shorten_buf_fname(buf_T *buf, char_u *dirname, int force)
+{
+  char_u      *p;
+
+  if (buf->b_fname != NULL
+      && !bt_nofile(buf)
+      && !path_with_url((char *)buf->b_fname)
+      && (force
+          || buf->b_sfname == NULL
+          || path_is_absolute(buf->b_sfname))) {
+    xfree(buf->b_sfname);
+    buf->b_sfname = NULL;
+    p = path_shorten_fname(buf->b_ffname, dirname);
+    if (p != NULL) {
+      buf->b_sfname = vim_strsave(p);
+      buf->b_fname = buf->b_sfname;
+    }
+    if (p == NULL || buf->b_fname == NULL) {
+      buf->b_fname = buf->b_ffname;
+    }
+  }
+}
+
 /*
  * Shorten filenames for all buffers.
- * When "force" is TRUE: Use full path from now on for files currently being
- * edited, both for file name and swap file name.  Try to shorten the file
- * names a bit, if safe to do so.
- * When "force" is FALSE: Only try to shorten absolute file names.
- * For buffers that have buftype "nofile" or "scratch": never change the file
- * name.
  */
 void shorten_fnames(int force)
 {
   char_u dirname[MAXPATHL];
-  char_u      *p;
 
   os_dirname(dirname, MAXPATHL);
   FOR_ALL_BUFFERS(buf) {
-    if (buf->b_fname != NULL
-        && !bt_nofile(buf)
-        && !path_with_url((char *)buf->b_fname)
-        && (force
-            || buf->b_sfname == NULL
-            || path_is_absolute_path(buf->b_sfname))) {
-      xfree(buf->b_sfname);
-      buf->b_sfname = NULL;
-      p = path_shorten_fname(buf->b_ffname, dirname);
-      if (p != NULL) {
-        buf->b_sfname = vim_strsave(p);
-        buf->b_fname = buf->b_sfname;
-      }
-      if (p == NULL || buf->b_fname == NULL)
-        buf->b_fname = buf->b_ffname;
-    }
+      shorten_buf_fname(buf, dirname, force);
 
     /* Always make the swap file name a full path, a "nofile" buffer may
      * also have a swap file. */
@@ -4394,7 +4447,7 @@ char *modname(const char *fname, const char *ext, bool prepend_dot)
   // Search backwards until we hit a '/', '\' or ':'.
   // Then truncate what is after the '/', '\' or ':' to BASENAMELEN characters.
   char *ptr = NULL;
-  for (ptr = retval + fnamelen; ptr > retval; mb_ptr_back(retval, ptr)) {
+  for (ptr = retval + fnamelen; ptr > retval; MB_PTR_BACK(retval, ptr)) {
     if (vim_ispathsep(*ptr)) {
       ptr++;
       break;
@@ -4444,70 +4497,115 @@ char *modname(const char *fname, const char *ext, bool prepend_dot)
 /// @param size size of the buffer
 /// @param fp file to read from
 ///
-/// @return true for end-of-file.
+/// @return true for EOF or error
 bool vim_fgets(char_u *buf, int size, FILE *fp) FUNC_ATTR_NONNULL_ALL
 {
-  char        *eof;
-#define FGETS_SIZE 200
-  char tbuf[FGETS_SIZE];
+  char *retval;
 
+  assert(size > 0);
   buf[size - 2] = NUL;
-  eof = fgets((char *)buf, size, fp);
-  if (buf[size - 2] != NUL && buf[size - 2] != '\n') {
-    buf[size - 1] = NUL;            /* Truncate the line */
 
-    /* Now throw away the rest of the line: */
+  do {
+    errno = 0;
+    retval = fgets((char *)buf, size, fp);
+  } while (retval == NULL && errno == EINTR && ferror(fp));
+
+  if (buf[size - 2] != NUL && buf[size - 2] != '\n') {
+    char tbuf[200];
+
+    buf[size - 1] = NUL;  // Truncate the line.
+
+    // Now throw away the rest of the line:
     do {
-      tbuf[FGETS_SIZE - 2] = NUL;
-      ignoredp = fgets((char *)tbuf, FGETS_SIZE, fp);
-    } while (tbuf[FGETS_SIZE - 2] != NUL && tbuf[FGETS_SIZE - 2] != '\n');
+      tbuf[sizeof(tbuf) - 2] = NUL;
+      errno = 0;
+      retval = fgets((char *)tbuf, sizeof(tbuf), fp);
+      if (retval == NULL && (feof(fp) || errno != EINTR)) {
+        break;
+      }
+    } while (tbuf[sizeof(tbuf) - 2] != NUL && tbuf[sizeof(tbuf) - 2] != '\n');
   }
-  return eof == NULL;
+  return retval == NULL;
 }
 
 /// Read 2 bytes from "fd" and turn them into an int, MSB first.
+/// Returns -1 when encountering EOF.
 int get2c(FILE *fd)
 {
-  int n;
-
-  n = getc(fd);
-  n = (n << 8) + getc(fd);
-  return n;
+  const int n = getc(fd);
+  if (n == EOF) {
+    return -1;
+  }
+  const int c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  return (n << 8) + c;
 }
 
 /// Read 3 bytes from "fd" and turn them into an int, MSB first.
+/// Returns -1 when encountering EOF.
 int get3c(FILE *fd)
 {
-  int n;
-
-  n = getc(fd);
-  n = (n << 8) + getc(fd);
-  n = (n << 8) + getc(fd);
-  return n;
+  int n = getc(fd);
+  if (n == EOF) {
+    return -1;
+  }
+  int c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  n = (n << 8) + c;
+  c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  return (n << 8) + c;
 }
 
 /// Read 4 bytes from "fd" and turn them into an int, MSB first.
+/// Returns -1 when encountering EOF.
 int get4c(FILE *fd)
 {
   // Use unsigned rather than int otherwise result is undefined
   // when left-shift sets the MSB.
   unsigned n;
 
-  n = (unsigned)getc(fd);
-  n = (n << 8) + (unsigned)getc(fd);
-  n = (n << 8) + (unsigned)getc(fd);
-  n = (n << 8) + (unsigned)getc(fd);
+  int c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  n = (unsigned)c;
+  c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  n = (n << 8) + (unsigned)c;
+  c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  n = (n << 8) + (unsigned)c;
+  c = getc(fd);
+  if (c == EOF) {
+    return -1;
+  }
+  n = (n << 8) + (unsigned)c;
   return (int)n;
 }
 
 /// Read 8 bytes from `fd` and turn them into a time_t, MSB first.
+/// Returns -1 when encountering EOF.
 time_t get8ctime(FILE *fd)
 {
   time_t n = 0;
-  int i;
 
-  for (i = 0; i < 8; i++) {
-    n = (n << 8) + getc(fd);
+  for (int i = 0; i < 8; i++) {
+    const int c = getc(fd);
+    if (c == EOF) {
+      return -1;
+    }
+    n = (n << 8) + c;
   }
   return n;
 }
@@ -4552,9 +4650,10 @@ int put_time(FILE *fd, time_t time_)
 
 /// os_rename() only works if both files are on the same file system, this
 /// function will (attempts to?) copy the file across if rename fails -- webb
-//
+///
 /// @return -1 for failure, 0 for success
-int vim_rename(char_u *from, char_u *to)
+int vim_rename(const char_u *from, const char_u *to)
+  FUNC_ATTR_NONNULL_ALL
 {
   int fd_in;
   int fd_out;
@@ -4573,10 +4672,12 @@ int vim_rename(char_u *from, char_u *to)
    * the file name differs we need to go through a temp file.
    */
   if (fnamecmp(from, to) == 0) {
-    if (p_fic && STRCMP(path_tail(from), path_tail(to)) != 0)
+    if (p_fic && (STRCMP(path_tail((char_u *)from), path_tail((char_u *)to))
+                  != 0)) {
       use_tmp_file = true;
-    else
+    } else {
       return 0;
+    }
   }
 
   // Fail if the "from" file doesn't exist. Avoids that "to" is deleted.
@@ -4642,9 +4743,9 @@ int vim_rename(char_u *from, char_u *to)
   /*
    * Rename() failed, try copying the file.
    */
-  perm = os_getperm(from);
+  perm = os_getperm((const char *)from);
 #ifdef HAVE_ACL
-  /* For systems that support ACL: get the ACL from the original file. */
+  // For systems that support ACL: get the ACL from the original file.
   acl = mch_get_acl(from);
 #endif
   fd_in = os_open((char *)from, O_RDONLY, 0);
@@ -4666,7 +4767,7 @@ int vim_rename(char_u *from, char_u *to)
     return -1;
   }
 
-  // Avoid xmalloc() here as vim_rename() is called by buf_write() when neovim
+  // Avoid xmalloc() here as vim_rename() is called by buf_write() when nvim
   // is `preserve_exit()`ing.
   buffer = try_malloc(BUFSIZE);
   if (buffer == NULL) {
@@ -4692,8 +4793,8 @@ int vim_rename(char_u *from, char_u *to)
     errmsg = _("E210: Error reading \"%s\"");
     to = from;
   }
-#ifndef UNIX        /* for Unix os_open() already set the permission */
-  os_setperm(to, perm);
+#ifndef UNIX  // For Unix os_open() already set the permission.
+  os_setperm((const char *)to, perm);
 #endif
 #ifdef HAVE_ACL
   mch_set_acl(to, acl);
@@ -4725,7 +4826,6 @@ check_timestamps (
     int focus                      /* called for GUI focus event */
 )
 {
-  buf_T       *buf;
   int didit = 0;
   int n;
 
@@ -4744,32 +4844,33 @@ check_timestamps (
 
   if (!stuff_empty() || global_busy || !typebuf_typed()
       || autocmd_busy || curbuf_lock > 0 || allbuf_lock > 0
-      )
-    need_check_timestamps = TRUE;               /* check later */
-  else {
-    ++no_wait_return;
-    did_check_timestamps = TRUE;
-    already_warned = FALSE;
-    for (buf = firstbuf; buf != NULL; ) {
-      /* Only check buffers in a window. */
+      ) {
+    need_check_timestamps = true;               // check later
+  } else {
+    no_wait_return++;
+    did_check_timestamps = true;
+    already_warned = false;
+    FOR_ALL_BUFFERS(buf) {
+      // Only check buffers in a window.
       if (buf->b_nwindows > 0) {
+        bufref_T bufref;
+        set_bufref(&bufref, buf);
         n = buf_check_timestamp(buf, focus);
-        if (didit < n)
+        if (didit < n) {
           didit = n;
-        if (n > 0 && !buf_valid(buf)) {
-          /* Autocommands have removed the buffer, start at the
-           * first one again. */
+        }
+        if (n > 0 && !bufref_valid(&bufref)) {
+          // Autocommands have removed the buffer, start at the first one again.
           buf = firstbuf;
           continue;
         }
       }
-      buf = buf->b_next;
     }
     --no_wait_return;
     need_check_timestamps = FALSE;
     if (need_wait_return && didit == 2) {
-      /* make sure msg isn't overwritten */
-      msg_puts((char_u *)"\n");
+      // make sure msg isn't overwritten
+      msg_puts("\n");
       ui_flush();
     }
   }
@@ -4828,6 +4929,7 @@ buf_check_timestamp (
     buf_T *buf,
     int focus               /* called for GUI focus event */
 )
+  FUNC_ATTR_NONNULL_ALL
 {
   int retval = 0;
   char_u      *path;
@@ -4842,6 +4944,9 @@ buf_check_timestamp (
   int n;
   char_u      *s;
   char        *reason;
+
+  bufref_T bufref;
+  set_bufref(&bufref, buf);
 
   // If its a terminal, there is no file name, the buffer is not loaded,
   // 'buftype' is set, we are in the middle of a save or being called
@@ -4865,10 +4970,12 @@ buf_check_timestamp (
           )) {
     retval = 1;
 
-    /* set b_mtime to stop further warnings (e.g., when executing
-     * FileChangedShell autocmd) */
+    // set b_mtime to stop further warnings (e.g., when executing
+    // FileChangedShell autocmd)
     if (!file_info_ok) {
-      buf->b_mtime = 0;
+      // When 'autoread' is set we'll check the file again to see if it
+      // re-appears.
+      buf->b_mtime = buf->b_p_ar;
       buf->b_orig_size = 0;
       buf->b_orig_mode = 0;
     } else {
@@ -4912,8 +5019,9 @@ buf_check_timestamp (
       allbuf_lock--;
       busy = false;
       if (n) {
-        if (!buf_valid(buf))
+        if (!bufref_valid(&bufref)) {
           EMSG(_("E246: FileChangedShell autocommand deleted buffer"));
+        }
         s = get_vim_var_str(VV_FCS_CHOICE);
         if (STRCMP(s, "reload") == 0 && *reason != 'd')
           reload = TRUE;
@@ -4975,8 +5083,8 @@ buf_check_timestamp (
     set_vim_var_string(VV_WARNINGMSG, tbuf, -1);
     if (can_reload) {
       if (*mesg2 != NUL) {
-        strncat(tbuf, "\n", tbuf_len);
-        strncat(tbuf, mesg2, tbuf_len);
+        xstrlcat(tbuf, "\n", tbuf_len - 1);
+        xstrlcat(tbuf, mesg2, tbuf_len - 1);
       }
       if (do_dialog(VIM_WARNING, (char_u *) _("Warning"), (char_u *) tbuf,
                     (char_u *) _("&OK\n&Load File"), 1, NULL, true) == 2) {
@@ -4984,18 +5092,17 @@ buf_check_timestamp (
       }
     } else if (State > NORMAL_BUSY || (State & CMDLINE) || already_warned) {
       if (*mesg2 != NUL) {
-        strncat(tbuf, "; ", tbuf_len);
-        strncat(tbuf, mesg2, tbuf_len);
+        xstrlcat(tbuf, "; ", tbuf_len - 1);
+        xstrlcat(tbuf, mesg2, tbuf_len - 1);
       }
       EMSG(tbuf);
       retval = 2;
     } else {
       if (!autocmd_busy) {
         msg_start();
-        msg_puts_attr((char_u *) tbuf, hl_attr(HLF_E) + MSG_HIST);
+        msg_puts_attr(tbuf, HL_ATTR(HLF_E) + MSG_HIST);
         if (*mesg2 != NUL) {
-          msg_puts_attr((char_u *)mesg2,
-                        hl_attr(HLF_W) + MSG_HIST);
+          msg_puts_attr(mesg2, HL_ATTR(HLF_W) + MSG_HIST);
         }
         msg_clr_eos();
         (void)msg_end();
@@ -5030,11 +5137,11 @@ buf_check_timestamp (
     }
   }
 
-  /* Trigger FileChangedShell when the file was changed in any way. */
-  if (buf_valid(buf) && retval != 0)
-    (void)apply_autocmds(EVENT_FILECHANGEDSHELLPOST,
-        buf->b_fname, buf->b_fname, FALSE, buf);
-
+  // Trigger FileChangedShell when the file was changed in any way.
+  if (bufref_valid(&bufref) && retval != 0) {
+    (void)apply_autocmds(EVENT_FILECHANGEDSHELLPOST, buf->b_fname, buf->b_fname,
+                         false, buf);
+  }
   return retval;
 }
 
@@ -5051,6 +5158,7 @@ void buf_reload(buf_T *buf, int orig_mode)
   linenr_T old_topline;
   int old_ro = buf->b_p_ro;
   buf_T       *savebuf;
+  bufref_T bufref;
   int saved = OK;
   aco_save_T aco;
   int flags = READ_NEW;
@@ -5074,18 +5182,17 @@ void buf_reload(buf_T *buf, int orig_mode)
     flags |= READ_KEEP_UNDO;
   }
 
-  /*
-   * To behave like when a new file is edited (matters for
-   * BufReadPost autocommands) we first need to delete the current
-   * buffer contents.  But if reading the file fails we should keep
-   * the old contents.  Can't use memory only, the file might be
-   * too big.  Use a hidden buffer to move the buffer contents to.
-   */
-  if (bufempty() || saved == FAIL) {
+  // To behave like when a new file is edited (matters for
+  // BufReadPost autocommands) we first need to delete the current
+  // buffer contents.  But if reading the file fails we should keep
+  // the old contents.  Can't use memory only, the file might be
+  // too big.  Use a hidden buffer to move the buffer contents to.
+  if (BUFEMPTY() || saved == FAIL) {
     savebuf = NULL;
   } else {
     // Allocate a buffer without putting it in the buffer list.
     savebuf = buflist_new(NULL, NULL, (linenr_T)1, BLN_DUMMY);
+    set_bufref(&bufref, savebuf);
     if (savebuf != NULL && buf == curbuf) {
       /* Open the memline. */
       curbuf = savebuf;
@@ -5103,19 +5210,21 @@ void buf_reload(buf_T *buf, int orig_mode)
   }
 
   if (saved == OK) {
-    curbuf->b_flags |= BF_CHECK_RO;           /* check for RO again */
-    keep_filetype = TRUE;                     /* don't detect 'filetype' */
-    if (readfile(buf->b_ffname, buf->b_fname, (linenr_T)0,
-            (linenr_T)0,
-            (linenr_T)MAXLNUM, &ea, flags) == FAIL) {
-      if (!aborting())
+    curbuf->b_flags |= BF_CHECK_RO;           // check for RO again
+    keep_filetype = true;                     // don't detect 'filetype'
+    if (readfile(buf->b_ffname, buf->b_fname, (linenr_T)0, (linenr_T)0,
+                 (linenr_T)MAXLNUM, &ea, flags) != OK) {
+      if (!aborting()) {
         EMSG2(_("E321: Could not reload \"%s\""), buf->b_fname);
-      if (savebuf != NULL && buf_valid(savebuf) && buf == curbuf) {
-        /* Put the text back from the save buffer.  First
-         * delete any lines that readfile() added. */
-        while (!bufempty())
-          if (ml_delete(buf->b_ml.ml_line_count, FALSE) == FAIL)
+      }
+      if (savebuf != NULL && bufref_valid(&bufref) && buf == curbuf) {
+        // Put the text back from the save buffer.  First
+        // delete any lines that readfile() added.
+        while (!BUFEMPTY()) {
+          if (ml_delete(buf->b_ml.ml_line_count, false) == FAIL) {
             break;
+          }
+        }
         (void)move_lines(savebuf, buf);
       }
     } else if (buf == curbuf) {  /* "buf" still valid */
@@ -5132,8 +5241,9 @@ void buf_reload(buf_T *buf, int orig_mode)
   }
   xfree(ea.cmd);
 
-  if (savebuf != NULL && buf_valid(savebuf))
-    wipe_buffer(savebuf, FALSE);
+  if (savebuf != NULL && bufref_valid(&bufref)) {
+    wipe_buffer(savebuf, false);
+  }
 
   /* Invalidate diff info if necessary. */
   diff_invalidate(curbuf);
@@ -5196,7 +5306,7 @@ void forward_slash(char_u *fname)
 {
   char_u      *p;
 
-  if (path_with_url(fname)) {
+  if (path_with_url((const char *)fname)) {
     return;
   }
   for (p = fname; *p != NUL; p++) {
@@ -5224,6 +5334,10 @@ static void vim_maketempdir(void)
   // Try the entries in `TEMP_DIR_NAMES` to create the temp directory.
   char_u template[TEMP_FILE_PATH_MAXLEN];
   char_u path[TEMP_FILE_PATH_MAXLEN];
+
+  // Make sure the umask doesn't remove the executable bit.
+  // "repl" has been reported to use "0177".
+  mode_t umask_save = umask(0077);
   for (size_t i = 0; i < ARRAY_SIZE(temp_dirs); i++) {
     // Expand environment variables, leave room for "/nvimXXXXXX/999999999"
     expand_env((char_u *)temp_dirs[i], template, TEMP_FILE_PATH_MAXLEN - 22);
@@ -5247,12 +5361,13 @@ static void vim_maketempdir(void)
       os_rmdir((char *)path);
     }
   }
+  (void)umask(umask_save);
 }
 
 /// Delete "name" and everything in it, recursively.
 /// @param name The path which should be deleted.
 /// @return 0 for success, -1 if some file was not deleted.
-int delete_recursive(char_u *name)
+int delete_recursive(const char *name)
 {
   int result = 0;
 
@@ -5266,7 +5381,7 @@ int delete_recursive(char_u *name)
                              EW_DIR | EW_FILE | EW_SILENT | EW_ALLLINKS
                              | EW_DODOT | EW_EMPTYOK) == OK) {
       for (int i = 0; i < file_count; i++) {
-        if (delete_recursive(files[i]) != 0) {
+        if (delete_recursive((const char *)files[i]) != 0) {
           result = -1;
         }
       }
@@ -5276,9 +5391,9 @@ int delete_recursive(char_u *name)
     }
 
     xfree(exp);
-    os_rmdir((char *)name);
+    os_rmdir(name);
   } else {
-    result = os_remove((char *)name) == 0 ? 0 : -1;
+    result = os_remove(name) == 0 ? 0 : -1;
   }
 
   return result;
@@ -5290,7 +5405,7 @@ void vim_deltempdir(void)
   if (vim_tempdir != NULL) {
     // remove the trailing path separator
     path_tail(vim_tempdir)[-1] = NUL;
-    delete_recursive(vim_tempdir);
+    delete_recursive((const char *)vim_tempdir);
     xfree(vim_tempdir);
     vim_tempdir = NULL;
   }
@@ -5361,11 +5476,9 @@ char_u *vim_tempname(void)
 
 static AutoPatCmd *active_apc_list = NULL; /* stack of active autocommands */
 
-/*
- * augroups stores a list of autocmd group names.
- */
-static garray_T augroups = {0, 0, sizeof(char_u *), 10, NULL};
-#define AUGROUP_NAME(i) (((char_u **)augroups.ga_data)[i])
+/// List of autocmd group names
+static garray_T augroups = { 0, 0, sizeof(char_u *), 10, NULL };
+#define AUGROUP_NAME(i) (((char **)augroups.ga_data)[i])
 
 /*
  * The ID of the current group.  Group 0 is the default one.
@@ -5379,6 +5492,18 @@ static int au_need_clean = FALSE;   /* need to delete marked patterns */
 static event_T last_event;
 static int last_group;
 static int autocmd_blocked = 0;         /* block all autocmds */
+
+// use get_deleted_augroup() to get this
+static const char *deleted_augroup = NULL;
+
+static inline const char *get_deleted_augroup(void)
+  FUNC_ATTR_ALWAYS_INLINE
+{
+    if (deleted_augroup == NULL) {
+      deleted_augroup = _("--Deleted--");
+    }
+    return deleted_augroup;
+}
 
 /*
  * Show the autocommands for one AutoPat.
@@ -5399,13 +5524,14 @@ static void show_autocmd(AutoPat *ap, event_T event)
     return;
   if (event != last_event || ap->group != last_group) {
     if (ap->group != AUGROUP_DEFAULT) {
-      if (AUGROUP_NAME(ap->group) == NULL)
-        msg_puts_attr((char_u *)_("--Deleted--"), hl_attr(HLF_E));
-      else
-        msg_puts_attr(AUGROUP_NAME(ap->group), hl_attr(HLF_T));
-      msg_puts((char_u *)"  ");
+      if (AUGROUP_NAME(ap->group) == NULL) {
+        msg_puts_attr(get_deleted_augroup(), HL_ATTR(HLF_E));
+      } else {
+        msg_puts_attr(AUGROUP_NAME(ap->group), HL_ATTR(HLF_T));
+      }
+      msg_puts("  ");
     }
-    msg_puts_attr(event_nr2name(event), hl_attr(HLF_T));
+    msg_puts_attr(event_nr2name(event), HL_ATTR(HLF_T));
     last_event = event;
     last_group = ap->group;
     msg_putchar('\n');
@@ -5496,6 +5622,15 @@ static void au_cleanup(void)
 
       /* remove the pattern if it has been marked for deletion */
       if (ap->pat == NULL) {
+        if (ap->next == NULL) {
+          if (prev_ap == &(first_autopat[(int)event])) {
+            last_autopat[(int)event] = NULL;
+          } else {
+            // this depends on the "next" field being the first in
+            // the struct
+            last_autopat[(int)event] = (AutoPat *)prev_ap;
+          }
+        }
         *prev_ap = ap->next;
         vim_regfree(ap->reg_prog);
         xfree(ap);
@@ -5532,7 +5667,7 @@ void aubuflocal_remove(buf_T *buf)
         if (p_verbose >= 6) {
           verbose_enter();
           smsg(_("auto-removing autocommand: %s <buffer=%d>"),
-              event_nr2name(event), buf->b_fnum);
+               event_nr2name(event), buf->b_fnum);
           verbose_leave();
         }
       }
@@ -5555,9 +5690,10 @@ static int au_new_group(char_u *name)
       ga_grow(&augroups, 1);
     }
 
-    AUGROUP_NAME(i) = vim_strsave(name);
-    if (i == augroups.ga_len)
-      ++augroups.ga_len;
+    AUGROUP_NAME(i) = xstrdup((char *)name);
+    if (i == augroups.ga_len) {
+      augroups.ga_len++;
+    }
   }
 
   return i;
@@ -5568,11 +5704,33 @@ static void au_del_group(char_u *name)
   int i;
 
   i = au_find_group(name);
-  if (i == AUGROUP_ERROR)       /* the group doesn't exist */
+  if (i == AUGROUP_ERROR) {      // the group doesn't exist
     EMSG2(_("E367: No such group: \"%s\""), name);
-  else {
+  } else if (i == current_augroup) {
+    EMSG(_("E936: Cannot delete the current group"));
+  } else {
+    event_T event;
+    AutoPat *ap;
+    int in_use = false;
+
+    for (event = (event_T)0; (int)event < (int)NUM_EVENTS;
+         event = (event_T)((int)event + 1)) {
+      for (ap = first_autopat[(int)event]; ap != NULL; ap = ap->next) {
+        if (ap->group == i && ap->pat != NULL) {
+          give_warning((char_u *)
+                       _("W19: Deleting augroup that is still in use"), true);
+          in_use = true;
+          event = NUM_EVENTS;
+          break;
+        }
+      }
+    }
     xfree(AUGROUP_NAME(i));
-    AUGROUP_NAME(i) = NULL;
+    if (in_use) {
+      AUGROUP_NAME(i) = (char *)get_deleted_augroup();
+    } else {
+      AUGROUP_NAME(i) = NULL;
+    }
   }
 }
 
@@ -5584,8 +5742,9 @@ static void au_del_group(char_u *name)
 static int au_find_group(const char_u *name)
   FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  for (int i = 0; i < augroups.ga_len; ++i) {
-    if (AUGROUP_NAME(i) != NULL && STRCMP(AUGROUP_NAME(i), name) == 0) {
+  for (int i = 0; i < augroups.ga_len; i++) {
+    if (AUGROUP_NAME(i) != NULL && AUGROUP_NAME(i) != get_deleted_augroup()
+        && STRCMP(AUGROUP_NAME(i), name) == 0) {
       return i;
     }
   }
@@ -5622,7 +5781,7 @@ void do_augroup(char_u *arg, int del_group)
     for (int i = 0; i < augroups.ga_len; ++i) {
       if (AUGROUP_NAME(i) != NULL) {
         msg_puts(AUGROUP_NAME(i));
-        msg_puts((char_u *)"  ");
+        msg_puts("  ");
       }
     }
     msg_clr_eos();
@@ -5634,11 +5793,18 @@ void do_augroup(char_u *arg, int del_group)
 void free_all_autocmds(void)
 {
   for (current_augroup = -1; current_augroup < augroups.ga_len;
-       ++current_augroup)
-    do_autocmd((char_u *)"", TRUE);
-  ga_clear_strings(&augroups);
-}
+       current_augroup++) {
+    do_autocmd((char_u *)"", true);
+  }
 
+  for (int i = 0; i < augroups.ga_len; i++) {
+    char *const s = ((char **)(augroups.ga_data))[i];
+    if ((const char *)s != get_deleted_augroup()) {
+      xfree(s);
+    }
+  }
+  ga_clear(&augroups);
+}
 #endif
 
 /*
@@ -5646,39 +5812,47 @@ void free_all_autocmds(void)
  * Return NUM_EVENTS if the event name was not found.
  * Return a pointer to the next event name in "end".
  */
-static event_T event_name2nr(char_u *start, char_u **end)
+static event_T event_name2nr(const char_u *start, char_u **end)
 {
-  char_u      *p;
+  const char_u *p;
   int i;
   int len;
 
-  /* the event name ends with end of line, a blank or a comma */
-  for (p = start; *p && !ascii_iswhite(*p) && *p != ','; ++p)
-    ;
-  for (i = 0; event_names[i].name != NULL; ++i) {
-    len = (int) event_names[i].len;
-    if (len == p - start && STRNICMP(event_names[i].name, start, len) == 0)
-      break;
+  // the event name ends with end of line, '|', a blank or a comma
+  for (p = start; *p && !ascii_iswhite(*p) && *p != ',' && *p != '|'; p++) {
   }
-  if (*p == ',')
-    ++p;
-  *end = p;
-  if (event_names[i].name == NULL)
+  for (i = 0; event_names[i].name != NULL; i++) {
+    len = (int)event_names[i].len;
+    if (len == p - start && STRNICMP(event_names[i].name, start, len) == 0) {
+      break;
+    }
+  }
+  if (*p == ',') {
+    p++;
+  }
+  *end = (char_u *)p;
+  if (event_names[i].name == NULL) {
     return NUM_EVENTS;
+  }
   return event_names[i].event;
 }
 
-/*
- * Return the name for event "event".
- */
-static char_u *event_nr2name(event_T event)
+/// Return the name for event
+///
+/// @param[in]  event  Event to return name for.
+///
+/// @return Event name, static string. Returns "Unknown" for unknown events.
+static const char *event_nr2name(event_T event)
+  FUNC_ATTR_NONNULL_RET FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_CONST
 {
   int i;
 
-  for (i = 0; event_names[i].name != NULL; ++i)
-    if (event_names[i].event == event)
-      return (char_u *)event_names[i].name;
-  return (char_u *)"Unknown";
+  for (i = 0; event_names[i].name != NULL; i++) {
+    if (event_names[i].event == event) {
+      return event_names[i].name;
+    }
+  }
+  return "Unknown";
 }
 
 /*
@@ -5700,7 +5874,7 @@ find_end_event (
     }
     pat = arg + 1;
   } else {
-    for (pat = arg; *pat && !ascii_iswhite(*pat); pat = p) {
+    for (pat = arg; *pat && *pat != '|' && !ascii_iswhite(*pat); pat = p) {
       if ((int)event_name2nr(pat, &p) >= (int)NUM_EVENTS) {
         if (have_group)
           EMSG2(_("E216: No such event: %s"), pat);
@@ -5791,19 +5965,19 @@ void au_event_restore(char_u *old_ei)
  *				    will be automatically executed for <event>
  *				    when editing a file matching <pat>, in
  *				    the current group.
- * :autocmd <event> <pat>	    Show the auto-commands associated with
+ * :autocmd <event> <pat>	    Show the autocommands associated with
  *				    <event> and <pat>.
- * :autocmd <event>		    Show the auto-commands associated with
+ * :autocmd <event>		    Show the autocommands associated with
  *				    <event>.
- * :autocmd			    Show all auto-commands.
- * :autocmd! <event> <pat> <cmd>    Remove all auto-commands associated with
+ * :autocmd			    Show all autocommands.
+ * :autocmd! <event> <pat> <cmd>    Remove all autocommands associated with
  *				    <event> and <pat>, and add the command
  *				    <cmd>, for the current group.
- * :autocmd! <event> <pat>	    Remove all auto-commands associated with
+ * :autocmd! <event> <pat>	    Remove all autocommands associated with
  *				    <event> and <pat> for the current group.
- * :autocmd! <event>		    Remove all auto-commands associated with
+ * :autocmd! <event>		    Remove all autocommands associated with
  *				    <event> for the current group.
- * :autocmd!			    Remove ALL auto-commands for the current
+ * :autocmd!			    Remove ALL autocommands for the current
  *				    group.
  *
  *  Multiple events and patterns may be given separated by commas.  Here are
@@ -5815,20 +5989,23 @@ void au_event_restore(char_u *old_ei)
  *
  * Mostly a {group} argument can optionally appear before <event>.
  */
-void do_autocmd(char_u *arg, int forceit)
+void do_autocmd(char_u *arg_in, int forceit)
 {
+  char_u      *arg = arg_in;
   char_u      *pat;
   char_u      *envpat = NULL;
   char_u      *cmd;
-  event_T event;
-  int need_free = FALSE;
-  int nested = FALSE;
+  int need_free = false;
+  int nested = false;
   int group;
 
-  /*
-   * Check for a legal group name.  If not, use AUGROUP_ALL.
-   */
-  group = au_get_grouparg(&arg);
+  if (*arg == '|') {
+    arg = (char_u *)"";
+    group = AUGROUP_ALL;  // no argument, use all groups
+  } else {
+    // Check for a legal group name.  If not, use AUGROUP_ALL.
+    group = au_get_grouparg(&arg);
+  }
 
   /*
    * Scan over the events.
@@ -5838,73 +6015,78 @@ void do_autocmd(char_u *arg, int forceit)
   if (pat == NULL)
     return;
 
-  /*
-   * Scan over the pattern.  Put a NUL at the end.
-   */
   pat = skipwhite(pat);
-  cmd = pat;
-  while (*cmd && (!ascii_iswhite(*cmd) || cmd[-1] == '\\'))
-    cmd++;
-  if (*cmd)
-    *cmd++ = NUL;
+  if (*pat == '|') {
+    pat = (char_u *)"";
+    cmd = (char_u *)"";
+  } else {
+    // Scan over the pattern.  Put a NUL at the end.
+    cmd = pat;
+    while (*cmd && (!ascii_iswhite(*cmd) || cmd[-1] == '\\')) {
+        cmd++;
+    }
+    if (*cmd) {
+      *cmd++ = NUL;
+    }
 
-  /* Expand environment variables in the pattern.  Set 'shellslash', we want
-   * forward slashes here. */
-  if (vim_strchr(pat, '$') != NULL || vim_strchr(pat, '~') != NULL) {
+    // Expand environment variables in the pattern.  Set 'shellslash', we want
+    // forward slashes here.
+    if (vim_strchr(pat, '$') != NULL || vim_strchr(pat, '~') != NULL) {
 #ifdef BACKSLASH_IN_FILENAME
-    int p_ssl_save = p_ssl;
+      int p_ssl_save = p_ssl;
 
-    p_ssl = TRUE;
+      p_ssl = true;
 #endif
-    envpat = expand_env_save(pat);
+      envpat = expand_env_save(pat);
 #ifdef BACKSLASH_IN_FILENAME
-    p_ssl = p_ssl_save;
+      p_ssl = p_ssl_save;
 #endif
-    if (envpat != NULL)
-      pat = envpat;
-  }
+      if (envpat != NULL) {
+        pat = envpat;
+      }
+    }
 
-  /*
-   * Check for "nested" flag.
-   */
-  cmd = skipwhite(cmd);
-  if (*cmd != NUL && STRNCMP(cmd, "nested", 6) == 0 && ascii_iswhite(cmd[6])) {
-    nested = TRUE;
-    cmd = skipwhite(cmd + 6);
-  }
+    // Check for "nested" flag.
+    cmd = skipwhite(cmd);
+    if (*cmd != NUL && STRNCMP(cmd, "nested", 6) == 0
+        && ascii_iswhite(cmd[6])) {
+      nested = true;
+      cmd = skipwhite(cmd + 6);
+    }
 
-  /*
-   * Find the start of the commands.
-   * Expand <sfile> in it.
-   */
-  if (*cmd != NUL) {
-    cmd = expand_sfile(cmd);
-    if (cmd == NULL)                /* some error */
-      return;
-    need_free = TRUE;
+    // Find the start of the commands.
+    // Expand <sfile> in it.
+    if (*cmd != NUL) {
+      cmd = expand_sfile(cmd);
+      if (cmd == NULL) {                // some error
+        return;
+      }
+      need_free = true;
+    }
   }
 
   /*
    * Print header when showing autocommands.
    */
   if (!forceit && *cmd == NUL) {
-    /* Highlight title */
-    MSG_PUTS_TITLE(_("\n--- Auto-Commands ---"));
+    // Highlight title
+    MSG_PUTS_TITLE(_("\n--- Autocommands ---"));
   }
 
   /*
    * Loop over the events.
    */
-  last_event = (event_T)-1;             /* for listing the event name */
-  last_group = AUGROUP_ERROR;           /* for listing the group name */
-  if (*arg == '*' || *arg == NUL) {
-    for (event = (event_T)0; (int)event < (int)NUM_EVENTS;
-         event = (event_T)((int)event + 1))
-      if (do_autocmd_event(event, pat,
-              nested, cmd, forceit, group) == FAIL)
+  last_event = (event_T)-1;             // for listing the event name
+  last_group = AUGROUP_ERROR;           // for listing the group name
+  if (*arg == '*' || *arg == NUL || *arg == '|') {
+    for (event_T event = (event_T)0; (int)event < (int)NUM_EVENTS;
+         event = (event_T)((int)event + 1)) {
+      if (do_autocmd_event(event, pat, nested, cmd, forceit, group) == FAIL) {
         break;
+      }
+    }
   } else {
-    while (*arg && !ascii_iswhite(*arg)) {
+    while (*arg && *arg != '|' && !ascii_iswhite(*arg)) {
       event_T event = event_name2nr(arg, &arg);
       assert(event < NUM_EVENTS);
       if (do_autocmd_event(event, pat, nested, cmd, forceit, group) == FAIL) {
@@ -5931,7 +6113,8 @@ static int au_get_grouparg(char_u **argp)
   char_u      *arg = *argp;
   int group = AUGROUP_ALL;
 
-  p = skiptowhite(arg);
+  for (p = arg; *p && !ascii_iswhite(*p) && *p != '|'; p++) {
+  }
   if (p > arg) {
     group_name = vim_strnsave(arg, (int)(p - arg));
     group = au_find_group(group_name);
@@ -6039,10 +6222,13 @@ static int do_autocmd_event(event_T event, char_u *pat, int nested, char_u *cmd,
       patlen = (int)STRLEN(buflocal_pat);       /*   but not endpat */
     }
 
-    /*
-     * Find AutoPat entries with this pattern.
-     */
-    prev_ap = &first_autopat[(int)event];
+    // Find AutoPat entries with this pattern.  When adding a command it
+    // always goes at or after the last one, so start at the end.
+    if (!forceit && *cmd != NUL && last_autopat[(int)event] != NULL) {
+      prev_ap = &last_autopat[(int)event];
+    } else {
+      prev_ap = &first_autopat[(int)event];
+    }
     while ((ap = *prev_ap) != NULL) {
       if (ap->pat != NULL) {
         /* Accept a pattern when:
@@ -6099,8 +6285,8 @@ static int do_autocmd_event(event_T event, char_u *pat, int nested, char_u *cmd,
         /* refuse to add buffer-local ap if buffer number is invalid */
         if (is_buflocal && (buflocal_nr == 0
                             || buflist_findnr(buflocal_nr) == NULL)) {
-          EMSGN(_("E680: <buffer=%d>: invalid buffer number "),
-              buflocal_nr);
+          emsgf(_("E680: <buffer=%d>: invalid buffer number "),
+                buflocal_nr);
           return FAIL;
         }
 
@@ -6128,6 +6314,7 @@ static int do_autocmd_event(event_T event, char_u *pat, int nested, char_u *cmd,
         }
         ap->cmds = NULL;
         *prev_ap = ap;
+        last_autopat[(int)event] = ap;
         ap->next = NULL;
         if (group == AUGROUP_ALL)
           ap->group = current_augroup;
@@ -6193,13 +6380,13 @@ do_doautocmd (
 
   fname = skipwhite(fname);
 
-  /*
-   * Loop over the events.
-   */
-  while (*arg && !ascii_iswhite(*arg))
-    if (apply_autocmds_group(event_name2nr(arg, &arg),
-            fname, NULL, TRUE, group, curbuf, NULL))
-      nothing_done = FALSE;
+  // Loop over the events.
+  while (*arg && !ends_excmd(*arg) && !ascii_iswhite(*arg)) {
+    if (apply_autocmds_group(event_name2nr(arg, &arg), fname, NULL, true,
+                             group, curbuf, NULL)) {
+      nothing_done = false;
+    }
+  }
 
   if (nothing_done && do_msg) {
     MSG(_("No matching autocommands"));
@@ -6220,6 +6407,7 @@ void ex_doautoall(exarg_T *eap)
   aco_save_T aco;
   char_u      *arg = eap->arg;
   int call_do_modelines = check_nomodeline(&arg);
+  bufref_T bufref;
 
   /*
    * This is a bit tricky: For some commands curwin->w_buffer needs to be
@@ -6232,8 +6420,9 @@ void ex_doautoall(exarg_T *eap)
     if (buf->b_ml.ml_mfp == NULL) {
       continue;
     }
-    /* find a window for this buffer and save some values */
+    // Find a window for this buffer and save some values.
     aucmd_prepbuf(&aco, buf);
+    set_bufref(&bufref, buf);
 
     bool did_aucmd;
     // execute the autocommands for this buffer
@@ -6249,9 +6438,10 @@ void ex_doautoall(exarg_T *eap)
     /* restore the current window */
     aucmd_restbuf(&aco);
 
-    /* stop if there is some error or buffer was deleted */
-    if (retval == FAIL || !buf_valid(buf))
+    // Stop if there is some error or buffer was deleted.
+    if (retval == FAIL || !bufref_valid(&bufref)) {
       break;
+    }
   }
 
   check_cursor();           /* just in case lines got deleted */
@@ -6358,7 +6548,7 @@ aucmd_prepbuf (
   }
   curbuf = buf;
   aco->new_curwin = curwin;
-  aco->new_curbuf = curbuf;
+  set_bufref(&aco->new_curbuf, curbuf);
 }
 
 /// Cleanup after executing autocommands for a (hidden) buffer.
@@ -6392,6 +6582,12 @@ win_found:
     win_remove(curwin, NULL);
     aucmd_win_used = false;
     last_status(false);         // may need to remove last status line
+
+    if (!valid_tabpage_win(curtab)) {
+      // no valid window in current tabpage
+      close_tabpage(curtab);
+    }
+
     restore_snapshot(SNAP_AUCMD_IDX, false);
     (void)win_comp_pos();       // recompute window positions
     unblock_autocmds();
@@ -6421,14 +6617,14 @@ win_found:
       // Restore the buffer which was previously edited by curwin, if it was
       // changed, we are still the same window and the buffer is valid.
       if (curwin == aco->new_curwin
-          && curbuf != aco->new_curbuf
-          && buf_valid(aco->new_curbuf)
-          && aco->new_curbuf->b_ml.ml_mfp != NULL) {
+          && curbuf != aco->new_curbuf.br_buf
+          && bufref_valid(&aco->new_curbuf)
+          && aco->new_curbuf.br_buf->b_ml.ml_mfp != NULL) {
         if (curwin->w_s == &curbuf->b_s) {
-          curwin->w_s = &aco->new_curbuf->b_s;
+          curwin->w_s = &aco->new_curbuf.br_buf->b_s;
         }
         curbuf->b_nwindows--;
-        curbuf = aco->new_curbuf;
+        curbuf = aco->new_curbuf.br_buf;
         curwin->w_buffer = curbuf;
         curbuf->b_nwindows++;
       }
@@ -6536,7 +6732,7 @@ bool trigger_cursorhold(void) FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 /// Return true if "event" autocommand is defined.
 ///
 /// @param event the autocommand to check
-bool has_event(int event) FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+bool has_event(event_T event) FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
   return first_autopat[event] != NULL;
 }
@@ -6565,7 +6761,6 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   char_u      *save_sourcing_name;
   linenr_T save_sourcing_lnum;
   char_u      *save_autocmd_fname;
-  int save_autocmd_fname_full;
   int save_autocmd_bufnr;
   char_u      *save_autocmd_match;
   int save_autocmd_busy;
@@ -6580,13 +6775,15 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   static int filechangeshell_busy = FALSE;
   proftime_T wait_time;
   bool did_save_redobuff = false;
+  save_redo_T save_redo;
+  const bool save_KeyTyped = KeyTyped;
 
-  /*
-   * Quickly return if there are no autocommands for this event or
-   * autocommands are blocked.
-   */
-  if (first_autopat[(int)event] == NULL || autocmd_blocked > 0)
+  // Quickly return if there are no autocommands for this event or
+  // autocommands are blocked.
+  if (event == NUM_EVENTS || first_autopat[(int)event] == NULL
+      || autocmd_blocked > 0) {
     goto BYPASS_AU;
+  }
 
   /*
    * When autocommands are busy, new autocommands are only executed when
@@ -6638,7 +6835,6 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
    * Save the autocmd_* variables and info about the current buffer.
    */
   save_autocmd_fname = autocmd_fname;
-  save_autocmd_fname_full = autocmd_fname_full;
   save_autocmd_bufnr = autocmd_bufnr;
   save_autocmd_match = autocmd_match;
   save_autocmd_busy = autocmd_busy;
@@ -6652,19 +6848,24 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
    * invalid.
    */
   if (fname_io == NULL) {
-    if (event == EVENT_COLORSCHEME || event == EVENT_OPTIONSET)
+    if (event == EVENT_COLORSCHEME
+        || event == EVENT_COLORSCHEMEPRE
+        || event == EVENT_OPTIONSET) {
       autocmd_fname = NULL;
-    else if (fname != NULL && *fname != NUL)
+    } else if (fname != NULL && !ends_excmd(*fname)) {
       autocmd_fname = fname;
-    else if (buf != NULL)
+    } else if (buf != NULL) {
       autocmd_fname = buf->b_ffname;
-    else
+    } else {
       autocmd_fname = NULL;
-  } else
+    }
+  } else {
     autocmd_fname = fname_io;
-  if (autocmd_fname != NULL)
-    autocmd_fname = vim_strsave(autocmd_fname);
-  autocmd_fname_full = FALSE;   /* call FullName_save() later */
+  }
+  if (autocmd_fname != NULL) {
+    // Allocate MAXPATHL for when eval_vars() resolves the fullpath.
+    autocmd_fname = vim_strnsave(autocmd_fname, MAXPATHL);
+  }
 
   /*
    * Set the buffer number to be used for <abuf>.
@@ -6698,8 +6899,16 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
     fname = vim_strsave(fname);         /* make a copy, so we can change it */
   } else {
     sfname = vim_strsave(fname);
-    // don't try expanding the following events
-    if (event == EVENT_COLORSCHEME
+    // Don't try expanding the following events.
+    if (event == EVENT_CMDLINECHANGED
+        || event == EVENT_CMDLINEENTER
+        || event == EVENT_CMDLINELEAVE
+        || event == EVENT_CMDWINENTER
+        || event == EVENT_CMDWINLEAVE
+        || event == EVENT_CMDUNDEFINED
+        || event == EVENT_COLORSCHEME
+        || event == EVENT_COLORSCHEMEPRE
+        || event == EVENT_DIRCHANGED
         || event == EVENT_FILETYPE
         || event == EVENT_FUNCUNDEFINED
         || event == EVENT_OPTIONSET
@@ -6708,10 +6917,12 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
         || event == EVENT_REMOTEREPLY
         || event == EVENT_SPELLFILEMISSING
         || event == EVENT_SYNTAX
-        || event == EVENT_TABCLOSED)
+        || event == EVENT_SIGNAL
+        || event == EVENT_TABCLOSED) {
       fname = vim_strsave(fname);
-    else
-      fname = (char_u *)FullName_save((char *)fname, FALSE);
+    } else {
+      fname = (char_u *)FullName_save((char *)fname, false);
+    }
   }
   if (fname == NULL) {      /* out of memory */
     xfree(sfname);
@@ -6735,8 +6946,8 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   autocmd_match = fname;
 
 
-  /* Don't redraw while doing auto commands. */
-  ++RedrawingDisabled;
+  // Don't redraw while doing autocommands.
+  RedrawingDisabled++;
   save_sourcing_name = sourcing_name;
   sourcing_name = NULL;         /* don't free this one */
   save_sourcing_lnum = sourcing_lnum;
@@ -6756,7 +6967,7 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   if (!autocmd_busy) {
     save_search_patterns();
     if (!ins_compl_active()) {
-      saveRedobuff();
+      saveRedobuff(&save_redo);
       did_save_redobuff = true;
     }
     did_filetype = keep_filetype;
@@ -6793,8 +7004,8 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
     patcmd.next = active_apc_list;
     active_apc_list = &patcmd;
 
-    /* set v:cmdarg (only when there is a matching pattern) */
-    save_cmdbang = get_vim_var_nr(VV_CMDBANG);
+    // set v:cmdarg (only when there is a matching pattern)
+    save_cmdbang = (long)get_vim_var_nr(VV_CMDBANG);
     if (eap != NULL) {
       save_cmdarg = set_cmdarg(eap, NULL);
       set_vim_var_nr(VV_CMDBANG, (long)eap->forceit);
@@ -6829,13 +7040,13 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   sourcing_lnum = save_sourcing_lnum;
   xfree(autocmd_fname);
   autocmd_fname = save_autocmd_fname;
-  autocmd_fname_full = save_autocmd_fname_full;
   autocmd_bufnr = save_autocmd_bufnr;
   autocmd_match = save_autocmd_match;
   current_SID = save_current_SID;
   restore_funccal(save_funccalp);
   if (do_profiling == PROF_YES)
     prof_child_exit(&wait_time);
+  KeyTyped = save_KeyTyped;
   xfree(fname);
   xfree(sfname);
   --nesting;            /* see matching increment above */
@@ -6846,7 +7057,7 @@ static bool apply_autocmds_group(event_T event, char_u *fname, char_u *fname_io,
   if (!autocmd_busy) {
     restore_search_patterns();
     if (did_save_redobuff) {
-      restoreRedobuff();
+      restoreRedobuff(&save_redo);
     }
     did_filetype = FALSE;
     while (au_pending_free_buf != NULL) {
@@ -6928,7 +7139,6 @@ auto_next_pat (
 {
   AutoPat     *ap;
   AutoCmd     *cp;
-  char_u      *name;
   char        *s;
 
   xfree(sourcing_name);
@@ -6947,11 +7157,13 @@ auto_next_pat (
           ? match_file_pat(NULL, &ap->reg_prog, apc->fname, apc->sfname,
                            apc->tail, ap->allow_dirs)
           : ap->buflocal_nr == apc->arg_bufnr) {
-        name = event_nr2name(apc->event);
-        s = _("%s Auto commands for \"%s\"");
-        sourcing_name = xmalloc(STRLEN(s) + STRLEN(name) + ap->patlen + 1);
-        sprintf((char *)sourcing_name, s,
-            (char *)name, (char *)ap->pat);
+        const char *const name = event_nr2name(apc->event);
+        s = _("%s Autocommands for \"%s\"");
+        const size_t sourcing_name_len = (STRLEN(s) + strlen(name) + ap->patlen
+                                          + 1);
+        sourcing_name = xmalloc(sourcing_name_len);
+        snprintf((char *)sourcing_name, sourcing_name_len, s, name,
+                 (char *)ap->pat);
         if (p_verbose >= 8) {
           verbose_enter();
           smsg(_("Executing %s"), sourcing_name);
@@ -7017,7 +7229,7 @@ char_u *getnextac(int c, void *cookie, int indent)
   if (p_verbose >= 9) {
     verbose_enter_scroll();
     smsg(_("autocommand %s"), ac->cmd);
-    msg_puts((char_u *)"\n");       /* don't overwrite this either */
+    msg_puts("\n");  // don't overwrite this either
     verbose_leave_scroll();
   }
   retval = vim_strsave(ac->cmd);
@@ -7083,13 +7295,17 @@ bool has_autocmd(event_T event, char_u *sfname, buf_T *buf)
  */
 char_u *get_augroup_name(expand_T *xp, int idx)
 {
-  if (idx == augroups.ga_len)           /* add "END" add the end */
+  if (idx == augroups.ga_len) {  // add "END" add the end
     return (char_u *)"END";
-  if (idx >= augroups.ga_len)           /* end of list */
+  }
+  if (idx >= augroups.ga_len) {  // end of list
     return NULL;
-  if (AUGROUP_NAME(idx) == NULL)        /* skip deleted entries */
+  }
+  if (AUGROUP_NAME(idx) == NULL || AUGROUP_NAME(idx) == get_deleted_augroup()) {
+    // skip deleted entries
     return (char_u *)"";
-  return AUGROUP_NAME(idx);             /* return a name */
+  }
+  return (char_u *)AUGROUP_NAME(idx);
 }
 
 static int include_groups = FALSE;
@@ -7146,21 +7362,27 @@ set_context_in_autocmd (
  */
 char_u *get_event_name(expand_T *xp, int idx)
 {
-  if (idx < augroups.ga_len) {          /* First list group names, if wanted */
-    if (!include_groups || AUGROUP_NAME(idx) == NULL)
-      return (char_u *)"";              /* skip deleted entries */
-    return AUGROUP_NAME(idx);           /* return a name */
+  if (idx < augroups.ga_len) {          // First list group names, if wanted
+    if (!include_groups || AUGROUP_NAME(idx) == NULL
+        || AUGROUP_NAME(idx) == get_deleted_augroup()) {
+      return (char_u *)"";              // skip deleted entries
+    }
+    return (char_u *)AUGROUP_NAME(idx);
   }
   return (char_u *)event_names[idx - augroups.ga_len].name;
 }
 
 
-/// Return true if autocmd "event" is supported.
-bool autocmd_supported(char_u *event)
+/// Check whether given autocommand is supported
+///
+/// @param[in]  event  Event to check.
+///
+/// @return True if it is, false otherwise.
+bool autocmd_supported(const char *const event)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
   char_u *p;
-
-  return event_name2nr(event, &p) != NUM_EVENTS;
+  return event_name2nr((const char_u *)event, &p) != NUM_EVENTS;
 }
 
 /// Return true if an autocommand is defined for a group, event and
@@ -7175,26 +7397,24 @@ bool autocmd_supported(char_u *event)
 ///   exists("#Event#pat")
 ///
 /// @param arg autocommand string
-bool au_exists(const char_u *arg) FUNC_ATTR_WARN_UNUSED_RESULT
+bool au_exists(const char *const arg) FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  char_u      *arg_save;
-  char_u      *pattern = NULL;
-  char_u      *event_name;
-  char_u      *p;
   event_T event;
   AutoPat     *ap;
   buf_T       *buflocal_buf = NULL;
   int group;
   bool retval = false;
 
-  /* Make a copy so that we can change the '#' chars to a NUL. */
-  arg_save = vim_strsave(arg);
-  p = vim_strchr(arg_save, '#');
-  if (p != NULL)
+  // Make a copy so that we can change the '#' chars to a NUL.
+  char *const arg_save = xstrdup(arg);
+  char *p = strchr(arg_save, '#');
+  if (p != NULL) {
     *p++ = NUL;
+  }
 
-  /* First, look for an autocmd group name */
-  group = au_find_group(arg_save);
+  // First, look for an autocmd group name.
+  group = au_find_group((char_u *)arg_save);
+  char *event_name;
   if (group == AUGROUP_ERROR) {
     /* Didn't match a group name, assume the first argument is an event. */
     group = AUGROUP_ALL;
@@ -7206,17 +7426,18 @@ bool au_exists(const char_u *arg) FUNC_ATTR_WARN_UNUSED_RESULT
       goto theend;
     }
 
-    /* Must be "Group#Event" or "Group#Event#pat". */
+    // Must be "Group#Event" or "Group#Event#pat".
     event_name = p;
-    p = vim_strchr(event_name, '#');
-    if (p != NULL)
-      *p++ = NUL;           /* "Group#Event#pat" */
+    p = strchr(event_name, '#');
+    if (p != NULL) {
+      *p++ = NUL;  // "Group#Event#pat"
+    }
   }
 
-  pattern = p;              /* "pattern" is NULL when there is no pattern */
+  char *pattern = p;  // "pattern" is NULL when there is no pattern.
 
-  /* find the index (enum) for the event name */
-  event = event_name2nr(event_name, &p);
+  // Find the index (enum) for the event name.
+  event = event_name2nr((char_u *)event_name, (char_u **)&p);
 
   /* return FALSE if the event name is not recognized */
   if (event == NUM_EVENTS)
@@ -7242,7 +7463,7 @@ bool au_exists(const char_u *arg) FUNC_ATTR_WARN_UNUSED_RESULT
         && (group == AUGROUP_ALL || ap->group == group)
         && (pattern == NULL
             || (buflocal_buf == NULL
-                ? fnamecmp(ap->pat, pattern) == 0
+                ? fnamecmp(ap->pat, (char_u *)pattern) == 0
                 : ap->buflocal_nr == buflocal_buf->b_fnum))) {
       retval = true;
       break;

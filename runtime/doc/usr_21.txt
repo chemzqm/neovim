@@ -1,4 +1,4 @@
-*usr_21.txt*	For Vim version 7.4.  Last change: 2012 Nov 02
+*usr_21.txt*	Nvim
 
 		     VIM USER MANUAL - by Bram Moolenaar
 
@@ -488,4 +488,4 @@ For more details see |modeline|.
 
 Next chapter: |usr_22.txt|  Finding the file to edit
 
-Copyright: see |manual-copyright|  vim:tw=78:ts=8:ft=help:norl:
+Copyright: see |manual-copyright|  vim:tw=78:ts=8:noet:ft=help:norl:

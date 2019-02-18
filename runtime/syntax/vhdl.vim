@@ -3,11 +3,10 @@
 " Maintainer:		Daniel Kho <daniel.kho@tauhop.com>
 " Previous Maintainer:	Czo <Olivier.Sirol@lip6.fr>
 " Credits:		Stephan Hegel <stephan.hegel@snc.siemens.com.cn>
-" Last Changed:		2016 Mar 05 by Daniel Kho
+" Last Changed:		2018 May 06 by Daniel Kho
 
-if version < 600
-  syntax clear
-elseif exists("b:current_syntax")
+" quit when a syntax file was already loaded
+if exists("b:current_syntax")
   finish
 endif
 
@@ -44,6 +43,8 @@ syn keyword 	vhdlStatement	sequence strong
 syn keyword 	vhdlStatement	then to transport type
 syn keyword 	vhdlStatement	unaffected units until use
 syn keyword 	vhdlStatement	variable
+" VHDL-2017 interface
+syn keyword 	vhdlStatement	view
 syn keyword 	vhdlStatement	vmode vprop vunit
 syn keyword 	vhdlStatement	wait when while with
 syn keyword 	vhdlStatement	note warning error failure
@@ -70,9 +71,7 @@ syn match	vhdlType	"\<time_vector\>\'\="
 
 syn match	vhdlType	"\<character\>\'\="
 syn match	vhdlType	"\<string\>\'\="
-"syn keyword	vhdlType	severity_level
-syn keyword	vhdlType	line
-syn keyword	vhdlType	text
+syn keyword	vhdlType	line text side width
 
 " Predefined standard IEEE VHDL types
 syn match	vhdlType	"\<std_ulogic\>\'\="
@@ -125,6 +124,8 @@ syn match   	vhdlAttribute	"\'succ"
 syn match   	vhdlAttribute	"\'val"
 syn match   	vhdlAttribute	"\'image"
 syn match   	vhdlAttribute	"\'value"
+" VHDL-2017 interface attribute
+syn match   	vhdlAttribute	"\'converse"
 
 syn keyword	vhdlBoolean	true false
 
@@ -166,6 +167,9 @@ syn match	vhdlOperator	"=\|\/=\|>\|<\|>="
 syn match	vhdlOperator	"<=\|:="
 syn match	vhdlOperator	"=>"
 
+" VHDL-2017 concurrent signal association (spaceship) operator
+syn match	vhdlOperator	"<=>"
+
 " VHDL-2008 conversion, matching equality/non-equality operators
 syn match	vhdlOperator	"??\|?=\|?\/=\|?<\|?<=\|?>\|?>="
 
@@ -184,8 +188,11 @@ syn match	vhdlError	"\(<\)[&+\-\/\\]\+"
 syn match	vhdlError	"[>=&+\-\/\\]\+\(<\)"
 " Covers most operators
 " support negative sign after operators. E.g. q<=-b;
-syn match	vhdlError	"\(&\|+\|\-\|\*\*\|\/=\|??\|?=\|?\/=\|?<=\|?>=\|>=\|<=\|:=\|=>\)[<>=&+\*\\?:]\+"
-syn match	vhdlError	"[<>=&+\-\*\\:]\+\(&\|+\|\*\*\|\/=\|??\|?=\|?\/=\|?<\|?<=\|?>\|?>=\|>=\|<=\|:=\|=>\)"
+" Supports VHDL-2017 spaceship (concurrent simple signal association).
+syn match	vhdlError	"\(<=\)[<=&+\*\\?:]\+"
+syn match	vhdlError	"[>=&+\-\*\\:]\+\(=>\)"
+syn match	vhdlError	"\(&\|+\|\-\|\*\*\|\/=\|??\|?=\|?\/=\|?<=\|?>=\|>=\|:=\|=>\)[<>=&+\*\\?:]\+"
+syn match	vhdlError	"[<>=&+\-\*\\:]\+\(&\|+\|\*\*\|\/=\|??\|?=\|?\/=\|?<\|?<=\|?>\|?>=\|>=\|<=\|:=\)"
 syn match	vhdlError	"\(?<\|?>\)[<>&+\*\/\\?:]\+"
 syn match	vhdlError	"\(<<\|>>\)[<>&+\*\/\\?:]\+"
 
@@ -234,35 +241,25 @@ syn match	vhdlPreProc	"\(^\|\s\)--\s*synopsys\s\+translate_\(on\|off\)\s*"
 syn sync	minlines=600
 
 " Define the default highlighting.
-" For version 5.7 and earlier: only when not done already
-" For version 5.8 and later: only when an item doesn't have highlighting yet
-if version >= 508 || !exists("did_vhdl_syntax_inits")
-    if version < 508
-	let did_vhdl_syntax_inits = 1
-	command -nargs=+ HiLink hi link <args>
-    else
-	command -nargs=+ HiLink hi def link <args>
-    endif
-    
-    HiLink	vhdlSpecial	Special
-    HiLink	vhdlStatement   Statement
-    HiLink	vhdlCharacter   Character
-    HiLink	vhdlString	String
-    HiLink	vhdlVector	Number
-    HiLink	vhdlBoolean	Number
-    HiLink	vhdlTodo	Todo
-    HiLink	vhdlFixme	Fixme
-    HiLink	vhdlComment	Comment
-    HiLink	vhdlNumber	Number
-    HiLink	vhdlTime	Number
-    HiLink	vhdlType	Type
-    HiLink	vhdlOperator    Operator
-    HiLink	vhdlError	Error
-    HiLink	vhdlAttribute   Special
-    HiLink	vhdlPreProc	PreProc
-    
-    delcommand HiLink
-endif
+" Only when an item doesn't have highlighting yet
+
+hi def link vhdlSpecial	Special
+hi def link vhdlStatement   Statement
+hi def link vhdlCharacter   Character
+hi def link vhdlString	String
+hi def link vhdlVector	Number
+hi def link vhdlBoolean	Number
+hi def link vhdlTodo	Todo
+hi def link vhdlFixme	Fixme
+hi def link vhdlComment	Comment
+hi def link vhdlNumber	Number
+hi def link vhdlTime	Number
+hi def link vhdlType	Type
+hi def link vhdlOperator    Operator
+hi def link vhdlError	Error
+hi def link vhdlAttribute   Special
+hi def link vhdlPreProc	PreProc
+
 
 let b:current_syntax = "vhdl"
 

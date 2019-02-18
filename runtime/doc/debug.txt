@@ -1,4 +1,4 @@
-*debug.txt*     For Vim version 7.4.  Last change: 2012 Feb 11
+*debug.txt*     Nvim
 
 
 		  VIM REFERENCE MANUAL    by Bram Moolenaar
@@ -9,9 +9,7 @@ Debugging Vim						*debug-vim*
 This is for debugging Vim itself, when it doesn't work properly.
 For debugging Vim scripts, functions, etc. see |debug-scripts|
 
-1. Location of a crash, using gcc and gdb	|debug-gcc|
-2. Locating memory leaks			|debug-leaks|
-3. Windows Bug Reporting			|debug-win32|
+                                      Type |gO| to see the table of contents.
 
 ==============================================================================
 
@@ -164,12 +162,8 @@ In WinDbg: choose Open Crash Dump on the File menu. Follow the instructions in
 							*get-ms-debuggers*
 3.5 Obtaining Microsoft Debugging Tools ~
 
-The Debugging Tools for Windows (including WinDbg) can be downloaded from
-    http://www.microsoft.com/whdc/devtools/debugging/default.mspx
-This includes the WinDbg debugger.
-
-Visual C++ 2005 Express Edition can be downloaded for free from:
-    http://msdn.microsoft.com/vstudio/express/visualC/default.aspx
+Visual Studio 2017 Community Edition can be downloaded for free from:
+    https://visualstudio.microsoft.com/downloads/
 
 =========================================================================
- vim:tw=78:ts=8:ft=help:norl:
+ vim:tw=78:ts=8:noet:ft=help:norl:

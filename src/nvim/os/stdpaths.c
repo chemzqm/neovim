@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 #include <stdbool.h>
 
 #include "nvim/os/stdpaths_defs.h"
@@ -16,20 +19,29 @@ static const char *xdg_env_vars[] = {
   [kXDGDataDirs] = "XDG_DATA_DIRS",
 };
 
+#ifdef WIN32
+static const char *const xdg_defaults_env_vars[] = {
+  [kXDGConfigHome] = "LOCALAPPDATA",
+  [kXDGDataHome] = "LOCALAPPDATA",
+  [kXDGCacheHome] = "TEMP",
+  [kXDGRuntimeDir] = NULL,
+  [kXDGConfigDirs] = NULL,
+  [kXDGDataDirs] = NULL,
+};
+#endif
+
 /// Defaults for XDGVarType values
 ///
 /// Used in case environment variables contain nothing. Need to be expanded.
 static const char *const xdg_defaults[] = {
 #ifdef WIN32
-  // Windows
-  [kXDGConfigHome] = "$LOCALAPPDATA",
-  [kXDGDataHome]   = "$LOCALAPPDATA",
-  [kXDGCacheHome]  = "$TEMP",
+  [kXDGConfigHome] = "~\\AppData\\Local",
+  [kXDGDataHome] = "~\\AppData\\Local",
+  [kXDGCacheHome] = "~\\AppData\\Local\\Temp",
   [kXDGRuntimeDir] = NULL,
   [kXDGConfigDirs] = NULL,
   [kXDGDataDirs] = NULL,
 #else
-  // Linux, BSD, CYGWIN, Apple
   [kXDGConfigHome] = "~/.config",
   [kXDGDataHome] = "~/.local/share",
   [kXDGCacheHome] = "~/.cache",
@@ -50,12 +62,19 @@ char *stdpaths_get_xdg_var(const XDGVarType idx)
   const char *const env = xdg_env_vars[idx];
   const char *const fallback = xdg_defaults[idx];
 
-  const char *const env_val = os_getenv(env);
+  const char *env_val = os_getenv(env);
+
+#ifdef WIN32
+  if (env_val == NULL && xdg_defaults_env_vars[idx] != NULL) {
+    env_val = os_getenv(xdg_defaults_env_vars[idx]);
+  }
+#endif
+
   char *ret = NULL;
   if (env_val != NULL) {
     ret = xstrdup(env_val);
   } else if (fallback) {
-    ret = (char *) expand_env_save((char_u *)fallback);
+    ret = (char *)expand_env_save((char_u *)fallback);
   }
 
   return ret;
@@ -69,7 +88,7 @@ char *stdpaths_get_xdg_var(const XDGVarType idx)
 ///
 /// In WIN32 get_xdg_home(kXDGDataHome) returns `{xdg_directory}/nvim-data` to
 /// avoid storing configuration and data files in the same path.
-static char *get_xdg_home(const XDGVarType idx)
+char *get_xdg_home(const XDGVarType idx)
   FUNC_ATTR_WARN_UNUSED_RESULT
 {
   char *dir = stdpaths_get_xdg_var(idx);

@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 // users.c -- operating system user information
 
 #include <uv.h>
@@ -72,11 +75,10 @@ int os_get_uname(uv_uid_t uid, char *s, size_t len)
 char *os_get_user_directory(const char *name)
 {
 #if defined(HAVE_GETPWNAM) && defined(HAVE_PWD_H)
-  struct passwd *pw;
-  if (name == NULL) {
+  if (name == NULL || *name == NUL) {
     return NULL;
   }
-  pw = getpwnam(name);  // NOLINT(runtime/threadsafe_fn)
+  struct passwd *pw = getpwnam(name);  // NOLINT(runtime/threadsafe_fn)
   if (pw != NULL) {
     // save the string from the static passwd entry into malloced memory
     return xstrdup(pw->pw_dir);

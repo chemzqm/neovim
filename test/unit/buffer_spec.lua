@@ -1,5 +1,6 @@
 
-local helpers = require("test.unit.helpers")
+local helpers = require("test.unit.helpers")(after_each)
+local itp = helpers.gen_itp(it)
 
 local to_cstr = helpers.to_cstr
 local get_str = helpers.ffi.string
@@ -39,17 +40,17 @@ describe('buffer functions', function()
 
   describe('buf_valid', function()
 
-    it('should view NULL as an invalid buffer', function()
+    itp('should view NULL as an invalid buffer', function()
       eq(false, buffer.buf_valid(NULL))
     end)
 
-    it('should view an open buffer as valid', function()
+    itp('should view an open buffer as valid', function()
       local buf = buflist_new(path1, buffer.BLN_LISTED)
 
       eq(true, buffer.buf_valid(buf))
     end)
 
-    it('should view a closed and hidden buffer as valid', function()
+    itp('should view a closed and hidden buffer as valid', function()
       local buf = buflist_new(path1, buffer.BLN_LISTED)
 
       close_buffer(NULL, buf, 0, 0)
@@ -57,7 +58,7 @@ describe('buffer functions', function()
       eq(true, buffer.buf_valid(buf))
     end)
 
-    it('should view a closed and unloaded buffer as valid', function()
+    itp('should view a closed and unloaded buffer as valid', function()
       local buf = buflist_new(path1, buffer.BLN_LISTED)
 
       close_buffer(NULL, buf, buffer.DOBUF_UNLOAD, 0)
@@ -65,7 +66,7 @@ describe('buffer functions', function()
       eq(true, buffer.buf_valid(buf))
     end)
 
-    it('should view a closed and wiped buffer as invalid', function()
+    itp('should view a closed and wiped buffer as invalid', function()
       local buf = buflist_new(path1, buffer.BLN_LISTED)
 
       close_buffer(NULL, buf, buffer.DOBUF_WIPE, 0)
@@ -84,7 +85,7 @@ describe('buffer functions', function()
       return buffer.buflist_findpat(to_cstr(pat), NULL, allow_unlisted, 0, 0)
     end
 
-    it('should find exact matches', function()
+    itp('should find exact matches', function()
       local buf = buflist_new(path1, buffer.BLN_LISTED)
 
       eq(buf.handle, buflist_findpat(path1, ONLY_LISTED))
@@ -92,7 +93,7 @@ describe('buffer functions', function()
       close_buffer(NULL, buf, buffer.DOBUF_WIPE, 0)
     end)
 
-    it('should prefer to match the start of a file path', function()
+    itp('should prefer to match the start of a file path', function()
       local buf1 = buflist_new(path1, buffer.BLN_LISTED)
       local buf2 = buflist_new(path2, buffer.BLN_LISTED)
       local buf3 = buflist_new(path3, buffer.BLN_LISTED)
@@ -106,7 +107,7 @@ describe('buffer functions', function()
       close_buffer(NULL, buf3, buffer.DOBUF_WIPE, 0)
     end)
 
-    it('should prefer to match the end of a file over the middle', function()
+    itp('should prefer to match the end of a file over the middle', function()
       --{ Given: Two buffers, where 'test' appears in both
       --  And: 'test' appears at the end of buf3 but in the middle of buf2
       local buf2 = buflist_new(path2, buffer.BLN_LISTED)
@@ -130,7 +131,7 @@ describe('buffer functions', function()
       close_buffer(NULL, buf3, buffer.DOBUF_WIPE, 0)
     end)
 
-    it('should match a unique fragment of a file path', function()
+    itp('should match a unique fragment of a file path', function()
       local buf1 = buflist_new(path1, buffer.BLN_LISTED)
       local buf2 = buflist_new(path2, buffer.BLN_LISTED)
       local buf3 = buflist_new(path3, buffer.BLN_LISTED)
@@ -142,7 +143,7 @@ describe('buffer functions', function()
       close_buffer(NULL, buf3, buffer.DOBUF_WIPE, 0)
     end)
 
-    it('should include / ignore unlisted buffers based on the flag.', function()
+    itp('should include / ignore unlisted buffers based on the flag.', function()
       --{ Given: A buffer
       local buf3 = buflist_new(path3, buffer.BLN_LISTED)
 
@@ -169,7 +170,7 @@ describe('buffer functions', function()
       --}
     end)
 
-    it('should prefer listed buffers to unlisted buffers.', function()
+    itp('should prefer listed buffers to unlisted buffers.', function()
       --{ Given: Two buffers that match a pattern
       local buf1 = buflist_new(path1, buffer.BLN_LISTED)
       local buf2 = buflist_new(path2, buffer.BLN_LISTED)
@@ -265,7 +266,7 @@ describe('buffer functions', function()
       local expected_cell_count = option.expected_cell_count or statusline_cell_count
       local expected_byte_length = option.expected_byte_length or expected_cell_count
 
-      it(description, function()
+      itp(description, function()
         if option.file_name then
           buffer.setfname(globals.curbuf, to_cstr(option.file_name), NULL, 1)
         else
@@ -280,6 +281,12 @@ describe('buffer functions', function()
         eq(expected_cell_count, result_cell_count)
       end)
     end
+
+    -- expression testing
+    statusline_test('Should expand expression', 2,
+     '%!expand(20+1)',       '21')
+    statusline_test('Should expand broken expression to itself', 11,
+     '%!expand(20+1',       'expand(20+1')
 
     -- file name testing
     statusline_test('should print no file name', 10,
@@ -305,6 +312,12 @@ describe('buffer functions', function()
     statusline_test('should put fillchar `~` in between text', 10,
       'abc%=def',            'abc~~~~def',
       {fillchar=('~'):byte()})
+    statusline_test('should handle zero-fillchar as a space', 10,
+      'abcde%=',             'abcde     ',
+      {fillchar=0})
+    statusline_test('should handle multibyte-fillchar as a dash', 10,
+      'abcde%=',             'abcde-----',
+      {fillchar=0x80})
     statusline_test('should print the tail file name', 80,
       '%t',                  'buffer_spec.lua',
       {file_name='test/unit/buffer_spec.lua', expected_cell_count=15})
@@ -350,6 +363,8 @@ describe('buffer functions', function()
 
     statusline_test('should truncate at the first `<`', 10,
       'abc%<def%<ghijklm',   'abc<hijklm')
+
+    statusline_test('should ignore trailing %', 3, 'abc%', 'abc')
 
     -- alignment testing
     statusline_test('should right align when using =', 20,
@@ -450,6 +465,11 @@ describe('buffer functions', function()
     statusline_test('should handle multibyte characters and different fillchars', 10,
       'Ą%=mid%=end',         'Ą@mid@@end',
       {fillchar=('@'):byte(), expected_byte_length=11})
+
+    -- escaping % testing
+    statusline_test('should handle escape of %', 4, 'abc%%', 'abc%')
+    statusline_test('case where escaped % does not fit', 3, 'abc%%abcabc', '<bc')
+    statusline_test('escaped % is first', 1, '%%', '%')
 
   end)
 end)

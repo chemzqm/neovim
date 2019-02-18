@@ -1,6 +1,11 @@
-/*
- * ex_eval.c: functions for Ex command line for the +eval feature.
- */
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
+// TODO(ZyX-I): move to eval/executor
+
+/// @file ex_eval.c
+///
+/// Functions for Ex command line for the +eval feature.
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,6 +17,7 @@
 #include "nvim/ex_eval.h"
 #include "nvim/charset.h"
 #include "nvim/eval.h"
+#include "nvim/eval/typval.h"
 #include "nvim/ex_cmds2.h"
 #include "nvim/ex_docmd.h"
 #include "nvim/message.h"
@@ -19,50 +25,57 @@
 #include "nvim/regexp.h"
 #include "nvim/strings.h"
 
-
-
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "ex_eval.c.generated.h"
 #endif
-/*
- * Exception handling terms:
- *
- *	:try		":try" command		\
- *	    ...		try block		|
- *	:catch RE	":catch" command	|
- *	    ...		catch clause		|- try conditional
- *	:finally	":finally" command	|
- *	    ...		finally clause		|
- *	:endtry		":endtry" command	/
- *
- * The try conditional may have any number of catch clauses and at most one
- * finally clause.  A ":throw" command can be inside the try block, a catch
- * clause, the finally clause, or in a function called or script sourced from
- * there or even outside the try conditional.  Try conditionals may be nested.
- */
 
-/*
- * Configuration whether an exception is thrown on error or interrupt.  When
- * the preprocessor macros below evaluate to FALSE, an error (did_emsg) or
- * interrupt (got_int) under an active try conditional terminates the script
- * after the non-active finally clauses of all active try conditionals have been
- * executed.  Otherwise, errors and/or interrupts are converted into catchable
- * exceptions (did_throw additionally set), which terminate the script only if
- * not caught.  For user exceptions, only did_throw is set.  (Note: got_int can
- * be set asynchronously afterwards by a SIGINT, so did_throw && got_int is not
- * a reliant test that the exception currently being thrown is an interrupt
- * exception.  Similarly, did_emsg can be set afterwards on an error in an
- * (unskipped) conditional command inside an inactive conditional, so did_throw
- * && did_emsg is not a reliant test that the exception currently being thrown
- * is an error exception.)  -  The macros can be defined as expressions checking
- * for a variable that is allowed to be changed during execution of a script.
- */
-/* Values used for the Vim release. */
-# define THROW_ON_ERROR         TRUE
-# define THROW_ON_ERROR_TRUE
-# define THROW_ON_INTERRUPT     TRUE
-# define THROW_ON_INTERRUPT_TRUE
+// Exception handling terms:
+//
+//      :try            ":try" command         ─┐
+//          ...         try block               │
+//      :catch RE       ":catch" command        │
+//          ...         catch clause            ├─ try conditional
+//      :finally        ":finally" command      │
+//          ...         finally clause          │
+//      :endtry         ":endtry" command      ─┘
+//
+// The try conditional may have any number of catch clauses and at most one
+// finally clause.  A ":throw" command can be inside the try block, a catch
+// clause, the finally clause, or in a function called or script sourced from
+// there or even outside the try conditional.  Try conditionals may be nested.
 
+// Configuration whether an exception is thrown on error or interrupt.  When
+// the preprocessor macros below evaluate to FALSE, an error (did_emsg) or
+// interrupt (got_int) under an active try conditional terminates the script
+// after the non-active finally clauses of all active try conditionals have been
+// executed.  Otherwise, errors and/or interrupts are converted into catchable
+// exceptions, which terminate the script only if not caught.  For user
+// exceptions, only current_exception is set.  (Note: got_int can be set
+// asynchronously afterwards by a SIGINT, so current_exception && got_int is not
+// a reliant test that the exception currently being thrown is an interrupt
+// exception.  Similarly, did_emsg can be set afterwards on an error in an
+// (unskipped) conditional command inside an inactive conditional, so
+// current_exception && did_emsg is not a reliant test that the exception
+// currently being thrown is an error exception.)  -  The macros can be defined
+// as expressions checking for a variable that is allowed to be changed during
+// execution of a script.
+
+// Values used for the Vim release.
+#define THROW_ON_ERROR true
+#define THROW_ON_ERROR_TRUE
+#define THROW_ON_INTERRUPT true
+#define THROW_ON_INTERRUPT_TRUE
+
+// Don't do something after an error, interrupt, or throw, or when
+// there is a surrounding conditional and it was not active.
+#define CHECK_SKIP \
+  (did_emsg \
+   || got_int \
+   || current_exception \
+   || (cstack->cs_idx > 0 \
+       && !(cstack->cs_flags[cstack->cs_idx - 1] & CSF_ACTIVE)))
+
+#define discard_pending_return(p) tv_free((typval_T *)(p))
 
 /*
  * When several errors appear in a row, setting "force_abort" is delayed until
@@ -88,7 +101,7 @@ static int cause_abort = FALSE;
  */
 int aborting(void)
 {
-  return (did_emsg && force_abort) || got_int || did_throw;
+  return (did_emsg && force_abort) || got_int || current_exception;
 }
 
 /*
@@ -172,8 +185,9 @@ int cause_errthrow(char_u *mesg, int severe, int *ignore)
    * currently throwing an exception, do nothing.  The message text will
    * then be stored to v:errmsg by emsg() without displaying it.
    */
-  if (((trylevel == 0 && !cause_abort) || emsg_silent) && !did_throw)
-    return FALSE;
+  if (((trylevel == 0 && !cause_abort) || emsg_silent) && !current_exception) {
+    return false;
+  }
 
   /*
    * Ignore an interrupt message when inside a try conditional or when an
@@ -202,12 +216,13 @@ int cause_errthrow(char_u *mesg, int severe, int *ignore)
    * exception currently being thrown to prevent it from being caught.  Just
    * execute finally clauses and terminate.
    */
-  if (did_throw) {
-    /* When discarding an interrupt exception, reset got_int to prevent the
-     * same interrupt being converted to an exception again and discarding
-     * the error exception we are about to throw here. */
-    if (current_exception->type == ET_INTERRUPT)
-      got_int = FALSE;
+  if (current_exception) {
+    // When discarding an interrupt exception, reset got_int to prevent the
+    // same interrupt being converted to an exception again and discarding
+    // the error exception we are about to throw here.
+    if (current_exception->type == ET_INTERRUPT) {
+      got_int = false;
+    }
     discard_current_exception();
   }
 
@@ -327,51 +342,49 @@ void do_errthrow(struct condstack *cstack, char_u *cmdname)
  */
 int do_intthrow(struct condstack *cstack)
 {
-  /*
-   * If no interrupt occurred or no try conditional is active and no exception
-   * is being thrown, do nothing (for compatibility of non-EH scripts).
-   */
-  if (!got_int || (trylevel == 0 && !did_throw))
-    return FALSE;
-
-#ifdef THROW_TEST       /* avoid warning for condition always true */
-  if (!THROW_ON_INTERRUPT) {
-    /*
-     * The interrupt aborts everything except for executing finally clauses.
-     * Discard any user or error or interrupt exception currently being
-     * thrown.
-     */
-    if (did_throw)
-      discard_current_exception();
-  } else
-#endif
-  {
-    /*
-     * Throw an interrupt exception, so that everything will be aborted
-     * (except for executing finally clauses), until the interrupt exception
-     * is caught; if still uncaught at the top level, the script processing
-     * will be terminated then.  -  If an interrupt exception is already
-     * being thrown, do nothing.
-     *
-     */
-    if (did_throw) {
-      if (current_exception->type == ET_INTERRUPT)
-        return FALSE;
-
-      /* An interrupt exception replaces any user or error exception. */
-      discard_current_exception();
-    }
-    if (throw_exception("Vim:Interrupt", ET_INTERRUPT, NULL) != FAIL)
-      do_throw(cstack);
+  // If no interrupt occurred or no try conditional is active and no exception
+  // is being thrown, do nothing (for compatibility of non-EH scripts).
+  if (!got_int || (trylevel == 0 && !current_exception)) {
+    return false;
   }
 
-  return TRUE;
+#ifdef THROW_TEST  // avoid warning for condition always true
+  if (!THROW_ON_INTERRUPT) {
+    // The interrupt aborts everything except for executing finally clauses.
+    // Discard any user or error or interrupt exception currently being
+    // thrown.
+    if (current_exception) {
+      discard_current_exception();
+    }
+  } else {
+#endif
+    // Throw an interrupt exception, so that everything will be aborted
+    // (except for executing finally clauses), until the interrupt exception
+    // is caught; if still uncaught at the top level, the script processing
+    // will be terminated then.  -  If an interrupt exception is already
+    // being thrown, do nothing.
+
+    if (current_exception) {
+      if (current_exception->type == ET_INTERRUPT) {
+        return false;
+      }
+
+      // An interrupt exception replaces any user or error exception.
+      discard_current_exception();
+    }
+    if (throw_exception("Vim:Interrupt", ET_INTERRUPT, NULL) != FAIL) {
+      do_throw(cstack);
+    }
+#ifdef THROW_TEST
+  }
+#endif
+
+  return true;
 }
 
-/*
- * Get an exception message that is to be stored in current_exception->value.
- */
-char_u *get_exception_string(void *value, int type, char_u *cmdname, int *should_free)
+// Get an exception message that is to be stored in current_exception->value.
+char_u *get_exception_string(void *value, except_type_T type, char_u *cmdname,
+                             int *should_free)
 {
   char_u      *ret, *mesg;
   char_u      *p, *val;
@@ -429,13 +442,11 @@ char_u *get_exception_string(void *value, int type, char_u *cmdname, int *should
 }
 
 
-/*
- * Throw a new exception.  Return FAIL when out of memory or it was tried to
- * throw an illegal user exception.  "value" is the exception string for a
- * user or interrupt exception, or points to a message list in case of an
- * error exception.
- */
-static int throw_exception(void *value, int type, char_u *cmdname)
+// Throw a new exception.  Return FAIL when out of memory or it was tried to
+// throw an illegal user exception.  "value" is the exception string for a
+// user or interrupt exception, or points to a message list in case of an
+// error exception.
+static int throw_exception(void *value, except_type_T type, char_u *cmdname)
 {
   except_T    *excp;
   int should_free;
@@ -482,7 +493,7 @@ static int throw_exception(void *value, int type, char_u *cmdname)
       msg_scroll = TRUE;            /* always scroll up, don't overwrite */
 
     smsg(_("Exception thrown: %s"), excp->value);
-    msg_puts((char_u *)"\n");       /* don't overwrite this either */
+    msg_puts("\n");  // don't overwrite this either
 
     if (debug_break_level > 0 || *p_vfile == NUL)
       cmdline_row = msg_row;
@@ -514,7 +525,7 @@ static void discard_exception(except_T *excp, int was_finished)
   char_u              *saved_IObuff;
 
   if (excp == NULL) {
-    EMSG(_(e_internal));
+    internal_error("discard_exception()");
     return;
   }
 
@@ -532,15 +543,17 @@ static void discard_exception(except_T *excp, int was_finished)
     smsg(was_finished ? _("Exception finished: %s")
                       : _("Exception discarded: %s"),
          excp->value);
-    msg_puts((char_u *)"\n");       /* don't overwrite this either */
-    if (debug_break_level > 0 || *p_vfile == NUL)
+    msg_puts("\n");  // don't overwrite this either
+    if (debug_break_level > 0 || *p_vfile == NUL) {
       cmdline_row = msg_row;
-    --no_wait_return;
-    if (debug_break_level > 0)
+    }
+    no_wait_return--;
+    if (debug_break_level > 0) {
       msg_silent = save_msg_silent;
-    else
+    } else {
       verbose_leave();
-    STRCPY(IObuff, saved_IObuff);
+    }
+    xstrlcpy((char *)IObuff, (const char *)saved_IObuff, IOSIZE);
     xfree(saved_IObuff);
   }
   if (excp->type != ET_INTERRUPT)
@@ -556,10 +569,11 @@ static void discard_exception(except_T *excp, int was_finished)
  */
 void discard_current_exception(void)
 {
-  discard_exception(current_exception, FALSE);
+  discard_exception(current_exception, false);
+  // Note: all globals manipulated here should be saved/restored in
+  // try_enter/try_leave.
   current_exception = NULL;
-  did_throw = FALSE;
-  need_rethrow = FALSE;
+  need_rethrow = false;
 }
 
 /*
@@ -595,7 +609,7 @@ static void catch_exception(except_T *excp)
       msg_scroll = TRUE;            /* always scroll up, don't overwrite */
 
     smsg(_("Exception caught: %s"), excp->value);
-    msg_puts((char_u *)"\n");       /* don't overwrite this either */
+    msg_puts("\n");  // don't overwrite this either
 
     if (debug_break_level > 0 || *p_vfile == NUL)
       cmdline_row = msg_row;
@@ -612,8 +626,9 @@ static void catch_exception(except_T *excp)
  */
 static void finish_exception(except_T *excp)
 {
-  if (excp != caught_stack)
-    EMSG(_(e_internal));
+  if (excp != caught_stack) {
+    internal_error("finish_exception()");
+  }
   caught_stack = caught_stack->caught;
   if (caught_stack != NULL) {
     set_vim_var_string(VV_EXCEPTION, (char *) caught_stack->value, -1);
@@ -714,7 +729,7 @@ static void report_pending(int action, int pending, void *value)
   ++no_wait_return;
   msg_scroll = TRUE;            /* always scroll up, don't overwrite */
   smsg(mesg, s);
-  msg_puts((char_u *)"\n");     /* don't overwrite this either */
+  msg_puts("\n");  // don't overwrite this either
   cmdline_row = msg_row;
   --no_wait_return;
   if (debug_break_level > 0)
@@ -777,7 +792,6 @@ void report_discard_pending(int pending, void *value)
  */
 void ex_if(exarg_T *eap)
 {
-  int error;
   int skip;
   int result;
   struct condstack    *cstack = eap->cstack;
@@ -788,16 +802,9 @@ void ex_if(exarg_T *eap)
     ++cstack->cs_idx;
     cstack->cs_flags[cstack->cs_idx] = 0;
 
-    /*
-     * Don't do something after an error, interrupt, or throw, or when there
-     * is a surrounding conditional and it was not active.
-     */
-    skip = did_emsg || got_int || did_throw || (cstack->cs_idx > 0
-                                                && !(cstack->cs_flags[cstack->
-                                                                      cs_idx -
-                                                                      1] &
-                                                     CSF_ACTIVE));
+    skip = CHECK_SKIP;
 
+    bool error;
     result = eval_to_bool(eap->arg, &error, &eap->nextcmd, skip);
 
     if (!skip && !error) {
@@ -842,20 +849,11 @@ void ex_endif(exarg_T *eap)
  */
 void ex_else(exarg_T *eap)
 {
-  int error;
   int skip;
   int result;
   struct condstack    *cstack = eap->cstack;
 
-  /*
-   * Don't do something after an error, interrupt, or throw, or when there is
-   * a surrounding conditional and it was not active.
-   */
-  skip = did_emsg || got_int || did_throw || (cstack->cs_idx > 0
-                                              && !(cstack->cs_flags[cstack->
-                                                                    cs_idx -
-                                                                    1] &
-                                                   CSF_ACTIVE));
+  skip = CHECK_SKIP;
 
   if (cstack->cs_idx < 0
       || (cstack->cs_flags[cstack->cs_idx]
@@ -899,6 +897,7 @@ void ex_else(exarg_T *eap)
   }
 
   if (eap->cmdidx == CMD_elseif) {
+    bool error;
     result = eval_to_bool(eap->arg, &error, &eap->nextcmd, skip);
     /* When throwing error exceptions, we want to throw always the first
      * of several errors in a row.  This is what actually happens when
@@ -923,7 +922,7 @@ void ex_else(exarg_T *eap)
  */
 void ex_while(exarg_T *eap)
 {
-  int error;
+  bool error;
   int skip;
   int result;
   struct condstack    *cstack = eap->cstack;
@@ -944,15 +943,7 @@ void ex_while(exarg_T *eap)
     cstack->cs_flags[cstack->cs_idx] =
       eap->cmdidx == CMD_while ? CSF_WHILE : CSF_FOR;
 
-    /*
-     * Don't do something after an error, interrupt, or throw, or when
-     * there is a surrounding conditional and it was not active.
-     */
-    skip = did_emsg || got_int || did_throw || (cstack->cs_idx > 0
-                                                && !(cstack->cs_flags[cstack->
-                                                                      cs_idx -
-                                                                      1] &
-                                                     CSF_ACTIVE));
+    skip = CHECK_SKIP;
     if (eap->cmdidx == CMD_while) {
       /*
        * ":while bool-expr"
@@ -1145,23 +1136,25 @@ void ex_endwhile(exarg_T *eap)
  */
 void ex_throw(exarg_T *eap)
 {
-  char_u      *arg = eap->arg;
-  char_u      *value;
+  const char *arg = (const char *)eap->arg;
+  char *value;
 
-  if (*arg != NUL && *arg != '|' && *arg != '\n')
-    value = eval_to_string_skip(arg, &eap->nextcmd, eap->skip);
-  else {
+  if (*arg != NUL && *arg != '|' && *arg != '\n') {
+    value = eval_to_string_skip(arg, (const char **)&eap->nextcmd,
+                                (bool)eap->skip);
+  } else {
     EMSG(_(e_argreq));
     value = NULL;
   }
 
-  /* On error or when an exception is thrown during argument evaluation, do
-   * not throw. */
+  // On error or when an exception is thrown during argument evaluation, do
+  // not throw.
   if (!eap->skip && value != NULL) {
-    if (throw_exception(value, ET_USER, NULL) == FAIL)
+    if (throw_exception((char_u *)value, ET_USER, NULL) == FAIL) {
       xfree(value);
-    else
+    } else {
       do_throw(eap->cstack);
+    }
   }
 }
 
@@ -1223,8 +1216,6 @@ void do_throw(struct condstack *cstack)
     cstack->cs_flags[idx] &= ~CSF_ACTIVE;
     cstack->cs_exception[idx] = current_exception;
   }
-
-  did_throw = TRUE;
 }
 
 /*
@@ -1243,15 +1234,7 @@ void ex_try(exarg_T *eap)
     cstack->cs_flags[cstack->cs_idx] = CSF_TRY;
     cstack->cs_pending[cstack->cs_idx] = CSTP_NONE;
 
-    /*
-     * Don't do something after an error, interrupt, or throw, or when there
-     * is a surrounding conditional and it was not active.
-     */
-    skip = did_emsg || got_int || did_throw || (cstack->cs_idx > 0
-                                                && !(cstack->cs_flags[cstack->
-                                                                      cs_idx -
-                                                                      1] &
-                                                     CSF_ACTIVE));
+    skip = CHECK_SKIP;
 
     if (!skip) {
       /* Set ACTIVE and TRUE.  TRUE means that the corresponding ":catch"
@@ -1343,8 +1326,9 @@ void ex_catch(exarg_T *eap)
      * corresponding try block never got active (because of an inactive
      * surrounding conditional or after an error or interrupt or throw).
      */
-    if (!did_throw || !(cstack->cs_flags[idx] & CSF_TRUE))
-      skip = TRUE;
+    if (!current_exception || !(cstack->cs_flags[idx] & CSF_TRUE)) {
+      skip = true;
+    }
 
     /*
      * Check for a match only if an exception is thrown but not caught by
@@ -1403,18 +1387,23 @@ void ex_catch(exarg_T *eap)
     }
 
     if (caught) {
-      /* Make this ":catch" clause active and reset did_emsg, got_int,
-       * and did_throw.  Put the exception on the caught stack. */
+      /* Make this ":catch" clause active and reset did_emsg and got_int.
+       * Put the exception on the caught stack. */
       cstack->cs_flags[idx] |= CSF_ACTIVE | CSF_CAUGHT;
-      did_emsg = got_int = did_throw = FALSE;
+      did_emsg = got_int = false;
       catch_exception((except_T *)cstack->cs_exception[idx]);
       /* It's mandatory that the current exception is stored in the cstack
        * so that it can be discarded at the next ":catch", ":finally", or
        * ":endtry" or when the catch clause is left by a ":continue",
        * ":break", ":return", ":finish", error, interrupt, or another
        * exception. */
-      if (cstack->cs_exception[cstack->cs_idx] != current_exception)
-        EMSG(_(e_internal));
+      if (cstack->cs_exception[cstack->cs_idx] != current_exception) {
+        internal_error("ex_catch()");
+      }
+      // Discarding current_exceptions happens based on what is stored in
+      // cstack->cs_exception, *all* calls to discard_current_exception() are
+      // (and must be) guarded by current_exception check.
+      current_exception = NULL;
     } else {
       /*
        * If there is a preceding catch clause and it caught the exception,
@@ -1473,7 +1462,7 @@ void ex_finally(exarg_T *eap)
      * interrupt or throw) or for a ":finally" without ":try" or a multiple
      * ":finally".  After every other error (did_emsg or the conditional
      * errors detected above) or after an interrupt (got_int) or an
-     * exception (did_throw), the finally clause must be executed.
+     * exception (current_exception), the finally clause must be executed.
      */
     skip = !(cstack->cs_flags[cstack->cs_idx] & CSF_TRUE);
 
@@ -1500,30 +1489,31 @@ void ex_finally(exarg_T *eap)
       cleanup_conditionals(cstack, CSF_TRY, FALSE);
 
       /*
-       * Make did_emsg, got_int, did_throw pending.  If set, they overrule
-       * a pending ":continue", ":break", ":return", or ":finish".  Then
-       * we have particularly to discard a pending return value (as done
+       * Make did_emsg, got_int, current_exception pending.  If set, they
+       * overrule a pending ":continue", ":break", ":return", or ":finish".
+       * Then we have particularly to discard a pending return value (as done
        * by the call to cleanup_conditionals() above when did_emsg or
        * got_int is set).  The pending values are restored by the
        * ":endtry", except if there is a new error, interrupt, exception,
        * ":continue", ":break", ":return", or ":finish" in the following
        * finally clause.  A missing ":endwhile", ":endfor" or ":endif"
-       * detected here is treated as if did_emsg and did_throw had
+       * detected here is treated as if did_emsg and current_exception had
        * already been set, respectively in case that the error is not
-       * converted to an exception, did_throw had already been unset.
+       * converted to an exception, current_exception had already been unset.
        * We must not set did_emsg here since that would suppress the
        * error message.
        */
-      if (pending == CSTP_ERROR || did_emsg || got_int || did_throw) {
+      if (pending == CSTP_ERROR || did_emsg || got_int || current_exception) {
         if (cstack->cs_pending[cstack->cs_idx] == CSTP_RETURN) {
           report_discard_pending(CSTP_RETURN,
               cstack->cs_rettv[cstack->cs_idx]);
           discard_pending_return(cstack->cs_rettv[cstack->cs_idx]);
         }
-        if (pending == CSTP_ERROR && !did_emsg)
-          pending |= (THROW_ON_ERROR) ? CSTP_THROW : 0;
-        else
-          pending |= did_throw ? CSTP_THROW : 0;
+        if (pending == CSTP_ERROR && !did_emsg) {
+          pending |= (THROW_ON_ERROR ? CSTP_THROW : 0);
+        } else {
+          pending |= (current_exception ? CSTP_THROW : 0);
+        }
         pending |= did_emsg  ? CSTP_ERROR     : 0;
         pending |= got_int   ? CSTP_INTERRUPT : 0;
         assert(pending >= CHAR_MIN && pending <= CHAR_MAX);
@@ -1536,14 +1526,15 @@ void ex_finally(exarg_T *eap)
          * exception.  When emsg() is called for a missing ":endif" or
          * a missing ":endwhile"/":endfor" detected here, the
          * exception will be discarded. */
-        if (did_throw && cstack->cs_exception[cstack->cs_idx]
-            != current_exception)
-          EMSG(_(e_internal));
+        if (current_exception
+            && cstack->cs_exception[cstack->cs_idx] != current_exception) {
+          internal_error("ex_finally()");
+        }
       }
 
       /*
        * Set CSL_HAD_FINA, so do_cmdline() will reset did_emsg,
-       * got_int, and did_throw and make the finally clause active.
+       * got_int, and current_exception and make the finally clause active.
        * This will happen after emsg() has been called for a missing
        * ":endif" or a missing ":endwhile"/":endfor" detected here, so
        * that the following finally clause will be executed even then.
@@ -1578,7 +1569,7 @@ void ex_endtry(exarg_T *eap)
     // made inactive by a ":continue", ":break", ":return", or ":finish" in
     // the finally clause.  The latter case need not be tested since then
     // anything pending has already been discarded.
-    skip = (did_emsg || got_int || did_throw
+    skip = (did_emsg || got_int || current_exception
             || !(cstack->cs_flags[cstack->cs_idx] & CSF_TRUE));
 
     if (!(cstack->cs_flags[cstack->cs_idx] & CSF_TRY)) {
@@ -1595,12 +1586,13 @@ void ex_endtry(exarg_T *eap)
       /*
        * If an exception is being thrown, discard it to prevent it from
        * being rethrown at the end of this function.  It would be
-       * discarded by the error message, anyway.  Resets did_throw.
+       * discarded by the error message, anyway.  Resets current_exception.
        * This does not affect the script termination due to the error
        * since "trylevel" is decremented after emsg() has been called.
        */
-      if (did_throw)
+      if (current_exception) {
         discard_current_exception();
+      }
     } else {
       idx = cstack->cs_idx;
 
@@ -1610,9 +1602,11 @@ void ex_endtry(exarg_T *eap)
        * a finally clause, we need to rethrow it after closing the try
        * conditional.
        */
-      if (did_throw && (cstack->cs_flags[idx] & CSF_TRUE)
-          && !(cstack->cs_flags[idx] & CSF_FINALLY))
-        rethrow = TRUE;
+      if (current_exception
+          && (cstack->cs_flags[idx] & CSF_TRUE)
+          && !(cstack->cs_flags[idx] & CSF_FINALLY)) {
+        rethrow = true;
+      }
     }
 
     /* If there was no finally clause, show the user when debugging or
@@ -1633,11 +1627,12 @@ void ex_endtry(exarg_T *eap)
       if (got_int) {
         skip = TRUE;
         (void)do_intthrow(cstack);
-        /* The do_intthrow() call may have reset did_throw or
-         * cstack->cs_pending[idx].*/
-        rethrow = FALSE;
-        if (did_throw && !(cstack->cs_flags[idx] & CSF_FINALLY))
-          rethrow = TRUE;
+        // The do_intthrow() call may have reset current_exception or
+        // cstack->cs_pending[idx].
+        rethrow = false;
+        if (current_exception && !(cstack->cs_flags[idx] & CSF_FINALLY)) {
+          rethrow = true;
+        }
       }
     }
 
@@ -1699,26 +1694,30 @@ void ex_endtry(exarg_T *eap)
         do_finish(eap, FALSE);
         break;
 
-      /* When the finally clause was entered due to an error,
-       * interrupt or throw (as opposed to a ":continue", ":break",
-       * ":return", or ":finish"), restore the pending values of
-       * did_emsg, got_int, and did_throw.  This is skipped, if there
-       * was a new error, interrupt, throw, ":continue", ":break",
-       * ":return", or ":finish".  in the finally clause. */
+      // When the finally clause was entered due to an error,
+      // interrupt or throw (as opposed to a ":continue", ":break",
+      // ":return", or ":finish"), restore the pending values of
+      // did_emsg, got_int, and current_exception.  This is skipped, if there
+      // was a new error, interrupt, throw, ":continue", ":break",
+      // ":return", or ":finish".  in the finally clause.
       default:
-        if (pending & CSTP_ERROR)
-          did_emsg = TRUE;
-        if (pending & CSTP_INTERRUPT)
-          got_int = TRUE;
-        if (pending & CSTP_THROW)
-          rethrow = TRUE;
+        if (pending & CSTP_ERROR) {
+          did_emsg = true;
+        }
+        if (pending & CSTP_INTERRUPT) {
+          got_int = true;
+        }
+        if (pending & CSTP_THROW) {
+          rethrow = true;
+        }
         break;
       }
     }
 
-    if (rethrow)
-      /* Rethrow the current exception (within this cstack). */
+    if (rethrow) {
+      // Rethrow the current exception (within this cstack).
       do_throw(cstack);
+    }
   }
 }
 
@@ -1748,33 +1747,34 @@ void enter_cleanup(cleanup_T *csp)
   int pending = CSTP_NONE;
 
   /*
-   * Postpone did_emsg, got_int, did_throw.  The pending values will be
+   * Postpone did_emsg, got_int, current_exception.  The pending values will be
    * restored by leave_cleanup() except if there was an aborting error,
    * interrupt, or uncaught exception after this function ends.
    */
-  if (did_emsg || got_int || did_throw || need_rethrow) {
-    csp->pending = (did_emsg     ? CSTP_ERROR     : 0)
-                   | (got_int      ? CSTP_INTERRUPT : 0)
-                   | (did_throw    ? CSTP_THROW     : 0)
-                   | (need_rethrow ? CSTP_THROW     : 0);
+  if (did_emsg || got_int || current_exception || need_rethrow) {
+    csp->pending = (did_emsg ? CSTP_ERROR : 0)
+                   | (got_int ? CSTP_INTERRUPT : 0)
+                   | (current_exception ? CSTP_THROW : 0)
+                   | (need_rethrow ? CSTP_THROW : 0);
 
-    /* If we are currently throwing an exception (did_throw), save it as
-     * well.  On an error not yet converted to an exception, update
-     * "force_abort" and reset "cause_abort" (as do_errthrow() would do).
-     * This is needed for the do_cmdline() call that is going to be made
-     * for autocommand execution.  We need not save *msg_list because
-     * there is an extra instance for every call of do_cmdline(), anyway.
+    /* If we are currently throwing an exception, save it as well.  On an error
+     * not yet converted to an exception, update "force_abort" and reset
+     * "cause_abort" (as do_errthrow() would do).  This is needed for the
+     * do_cmdline() call that is going to be made for autocommand execution.  We
+     * need not save *msg_list because there is an extra instance for every call
+     * of do_cmdline(), anyway.
      */
-    if (did_throw || need_rethrow)
+    if (current_exception || need_rethrow) {
       csp->exception = current_exception;
-    else {
+    } else {
       csp->exception = NULL;
       if (did_emsg) {
         force_abort |= cause_abort;
         cause_abort = FALSE;
       }
     }
-    did_emsg = got_int = did_throw = need_rethrow = FALSE;
+    did_emsg = got_int = need_rethrow = false;
+    current_exception = NULL;
 
     /* Report if required by the 'verbose' option or when debugging.  */
     report_make_pending(pending, csp->exception);
@@ -1846,19 +1846,20 @@ void leave_cleanup(cleanup_T *csp)
       force_abort = FALSE;
     }
 
-    /*
-     * Restore the pending values of did_emsg, got_int, and did_throw.
-     */
-    if (pending & CSTP_ERROR)
-      did_emsg = TRUE;
-    if (pending & CSTP_INTERRUPT)
-      got_int = TRUE;
-    if (pending & CSTP_THROW)
-      need_rethrow = TRUE;          /* did_throw will be set by do_one_cmd() */
+    // Restore the pending values of did_emsg, got_int, and current_exception.
+    if (pending & CSTP_ERROR) {
+      did_emsg = true;
+    }
+    if (pending & CSTP_INTERRUPT) {
+      got_int = true;
+    }
+    if (pending & CSTP_THROW) {
+      need_rethrow = true;  // current_exception will be set by do_one_cmd()
+    }
 
-    /* Report if required by the 'verbose' option or when debugging. */
-    report_resume_pending(pending,
-        (pending & CSTP_THROW) ? (void *)current_exception : NULL);
+    // Report if required by the 'verbose' option or when debugging.
+    report_resume_pending(
+        pending, ((pending & CSTP_THROW) ? (void *)current_exception : NULL));
   }
 }
 

@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 #include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -5,12 +8,13 @@
 
 #include <uv.h>
 
+#include "nvim/log.h"
 #include "nvim/event/loop.h"
 #include "nvim/event/wstream.h"
 #include "nvim/vim.h"
 #include "nvim/memory.h"
 
-#define DEFAULT_MAXMEM 1024 * 1024 * 10
+#define DEFAULT_MAXMEM 1024 * 1024 * 2000
 
 typedef struct {
   Stream *stream;
@@ -86,7 +90,7 @@ bool wstream_write(Stream *stream, WBuffer *buffer)
 
   uv_buf_t uvbuf;
   uvbuf.base = buffer->data;
-  uvbuf.len = buffer->size;
+  uvbuf.len = UV_BUF_LEN(buffer->size);
 
   if (uv_write(&data->uv_req, stream->uvstream, &uvbuf, 1, write_cb)) {
     xfree(data);

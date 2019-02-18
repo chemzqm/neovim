@@ -2,11 +2,14 @@ local helpers = require('test.functional.helpers')(after_each)
 local thelpers = require('test.functional.terminal.helpers')
 local clear = helpers.clear
 local feed, nvim = helpers.feed, helpers.nvim
-local execute = helpers.execute
+local feed_command = helpers.feed_command
+local command = helpers.command
+local eq = helpers.eq
+local eval = helpers.eval
+local iswin = helpers.iswin
+local retry = helpers.retry
 
-if helpers.pending_win32(pending) then return end
-
-describe('terminal', function()
+describe(':terminal', function()
   local screen
 
   before_each(function()
@@ -24,77 +27,80 @@ describe('terminal', function()
     screen:detach()
   end)
 
-  it('resets its size when entering terminal window', function()
+  it('next to a closing window', function()
+    command('split')
+    command('terminal')
+    command('vsplit foo')
+    eq(3, eval("winnr('$')"))
+    feed('ZQ')  -- Close split, should not crash. #7538
+    eq(2, eval("1+1"))  -- Still alive?
+  end)
+
+  it('does not change size on WinEnter', function()
+    if helpers.pending_win32(pending) then return end
     feed('<c-\\><c-n>')
-    execute('2split')
+    feed_command('2split')
     screen:expect([[
       tty ready                                         |
-      ^rows: 2, cols: 50                                 |
+      ^rows: 5, cols: 50                                 |
       ==========                                        |
       tty ready                                         |
-      rows: 2, cols: 50                                 |
+      rows: 5, cols: 50                                 |
       {2: }                                                 |
-      {4:~                                                 }|
-      {4:~                                                 }|
-      ==========                                        |
                                                         |
+                                                        |
+      ==========                                        |
+      :2split                                           |
     ]])
-    execute('wincmd p')
+    feed_command('wincmd p')
     screen:expect([[
       tty ready                                         |
-      rows: 2, cols: 50                                 |
+      rows: 5, cols: 50                                 |
       ==========                                        |
       tty ready                                         |
-      rows: 2, cols: 50                                 |
-      rows: 5, cols: 50                                 |
+      ^rows: 5, cols: 50                                 |
       {2: }                                                 |
-      ^                                                  |
-      ==========                                        |
-      :wincmd p                                         |
-    ]])
-    execute('wincmd p')
-    screen:expect([[
-      rows: 5, cols: 50                                 |
-      ^rows: 2, cols: 50                                 |
-      ==========                                        |
-      rows: 5, cols: 50                                 |
-      rows: 2, cols: 50                                 |
-      {2: }                                                 |
-      {4:~                                                 }|
-      {4:~                                                 }|
+                                                        |
+                                                        |
       ==========                                        |
       :wincmd p                                         |
     ]])
   end)
 
-  describe('when the screen is resized', function()
-    it('will forward a resize request to the program', function()
-      screen:try_resize(screen._width + 3, screen._height + 5)
-      screen:expect([[
-        tty ready                                            |
-        rows: 14, cols: 53                                   |
-        {1: }                                                    |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-                                                             |
-        {3:-- TERMINAL --}                                       |
-      ]])
-      screen:try_resize(screen._width - 6, screen._height - 10)
-      screen:expect([[
-        tty ready                                      |
-        rows: 14, cols: 53                             |
-        rows: 4, cols: 47                              |
-        {1: }                                              |
-        {3:-- TERMINAL --}                                 |
-      ]])
-    end)
+  it('forwards resize request to the program', function()
+    feed([[<C-\><C-N>G:]])  -- Go to cmdline-mode, so cursor is at bottom.
+    local w1, h1 = screen._width - 3, screen._height - 2
+    local w2, h2 = w1 - 6, h1 - 3
+
+    if iswin() then
+      -- win: SIGWINCH is unreliable, use a weaker test. #7506
+      retry(3, 30000, function()
+        screen:try_resize(w1, h1)
+        screen:expect{any='rows: 7, cols: 47'}
+        screen:try_resize(w2, h2)
+        screen:expect{any='rows: 4, cols: 41'}
+      end)
+      return
+    end
+
+    screen:try_resize(w1, h1)
+    screen:expect([[
+      tty ready                                      |
+      rows: 7, cols: 47                              |
+      {2: }                                              |
+                                                     |
+                                                     |
+                                                     |
+                                                     |
+      :^                                              |
+    ]])
+    screen:try_resize(w2, h2)
+    screen:expect([[
+      tty ready                                |
+      rows: 7, cols: 47                        |
+      rows: 4, cols: 41                        |
+      {2: }                                        |
+      :^                                        |
+    ]])
   end)
 end)

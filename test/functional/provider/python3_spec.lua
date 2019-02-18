@@ -2,20 +2,25 @@ local helpers = require('test.functional.helpers')(after_each)
 local eval, command, feed = helpers.eval, helpers.command, helpers.feed
 local eq, clear, insert = helpers.eq, helpers.clear, helpers.insert
 local expect, write_file = helpers.expect, helpers.write_file
+local expect_err = helpers.expect_err
+local feed_command = helpers.feed_command
+local source = helpers.source
+local missing_provider = helpers.missing_provider
 
 do
   clear()
-  command('let [g:interp, g:errors] = provider#pythonx#Detect(3)')
-  local errors = eval('g:errors')
-  if errors ~= '' then
-    pending(
-      'Python 3 (or the Python 3 neovim module) is broken or missing:\n' .. errors,
-      function() end)
+  if missing_provider('python3') then
+    it(':python3 reports E319 if provider is missing', function()
+      local expected = [[Vim%(py3.*%):E319: No "python3" provider found.*]]
+      expect_err(expected, command, 'py3 print("foo")')
+      expect_err(expected, command, 'py3file foo')
+    end)
+    pending('Python 3 (or the pynvim module) is broken/missing', function() end)
     return
   end
 end
 
-describe('python3 commands and functions', function()
+describe('python3 provider', function()
   before_each(function()
     clear()
     command('python3 import vim')
@@ -28,6 +33,15 @@ describe('python3 commands and functions', function()
   it('python3_execute', function()
     command('python3 vim.vars["set_by_python3"] = [100, 0]')
     eq({100, 0}, eval('g:set_by_python3'))
+  end)
+
+  it('does not truncate error message <1 MB', function()
+    -- XXX: Python limits the error name to 200 chars, so this test is
+    -- mostly bogus.
+    local very_long_symbol = string.rep('a', 1200)
+    feed_command(':silent! py3 print('..very_long_symbol..' b)')
+    -- Truncated error message would not contain this (last) line.
+    eq('SyntaxError: invalid syntax', eval('v:errmsg'))
   end)
 
   it('python3_execute with nested commands', function()
@@ -74,5 +88,21 @@ describe('python3 commands and functions', function()
 
   it('py3eval', function()
     eq({1, 2, {['key'] = 'val'}}, eval([[py3eval('[1, 2, {"key": "val"}]')]]))
+  end)
+
+  it('RPC call to expand("<afile>") during BufDelete #5245 #5617', function()
+    source([=[
+      python3 << EOF
+      import vim
+      def foo():
+        vim.eval('expand("<afile>:p")')
+        vim.eval('bufnr(expand("<afile>:p"))')
+      EOF
+      autocmd BufDelete * python3 foo()
+      autocmd BufUnload * python3 foo()]=])
+    feed_command("exe 'split' tempname()")
+    feed_command("bwipeout!")
+    feed_command('help help')
+    eq(2, eval('1+1'))  -- Still alive?
   end)
 end)

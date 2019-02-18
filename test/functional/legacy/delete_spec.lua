@@ -1,37 +1,38 @@
 local helpers = require('test.functional.helpers')(after_each)
 local clear, source = helpers.clear, helpers.source
-local eq, eval, execute = helpers.eq, helpers.eval, helpers.execute
-
-if helpers.pending_win32(pending) then return end
+local eq, eval, command = helpers.eq, helpers.eval, helpers.command
 
 describe('Test for delete()', function()
   before_each(clear)
+  after_each(function()
+    os.remove('Xfile')
+  end)
 
   it('file delete', function()
-    execute('split Xfile')
-    execute("call setline(1, ['a', 'b'])")
-    execute('wq')
+    command('split Xfile')
+    command("call setline(1, ['a', 'b'])")
+    command('wq')
     eq(eval("['a', 'b']"), eval("readfile('Xfile')"))
     eq(0, eval("delete('Xfile')"))
     eq(-1, eval("delete('Xfile')"))
   end)
 
   it('directory delete', function()
-    execute("call mkdir('Xdir1')")
+    command("call mkdir('Xdir1')")
     eq(1, eval("isdirectory('Xdir1')"))
     eq(0, eval("delete('Xdir1', 'd')"))
     eq(0, eval("isdirectory('Xdir1')"))
     eq(-1, eval("delete('Xdir1', 'd')"))
   end)
   it('recursive delete', function()
-    execute("call mkdir('Xdir1')")
-    execute("call mkdir('Xdir1/subdir')")
-    execute("call mkdir('Xdir1/empty')")
-    execute('split Xdir1/Xfile')
-    execute("call setline(1, ['a', 'b'])")
-    execute('w')
-    execute('w Xdir1/subdir/Xfile')
-    execute('close')
+    command("call mkdir('Xdir1')")
+    command("call mkdir('Xdir1/subdir')")
+    command("call mkdir('Xdir1/empty')")
+    command('split Xdir1/Xfile')
+    command("call setline(1, ['a', 'b'])")
+    command('w')
+    command('w Xdir1/subdir/Xfile')
+    command('close')
 
     eq(1, eval("isdirectory('Xdir1')"))
     eq(eval("['a', 'b']"), eval("readfile('Xdir1/Xfile')"))
@@ -48,8 +49,15 @@ describe('Test for delete()', function()
       split Xfile
       call setline(1, ['a', 'b'])
       wq
-      silent !ln -s Xfile Xlink
+      if has('win32')
+        silent !mklink Xlink Xfile
+      else
+        silent !ln -s Xfile Xlink
+      endif
     ]])
+    if eval('v:shell_error') ~= 0 then
+      pending('Cannot create symlink', function()end)
+    end
     -- Delete the link, not the file
     eq(0, eval("delete('Xlink')"))
     eq(-1, eval("delete('Xlink')"))
@@ -57,8 +65,12 @@ describe('Test for delete()', function()
   end)
 
   it('symlink directory delete', function()
-    execute("call mkdir('Xdir1')")
-    execute("silent !ln -s Xdir1 Xlink")
+    command("call mkdir('Xdir1')")
+    if helpers.iswin() then
+      command("silent !mklink /j Xlink Xdir1")
+    else
+      command("silent !ln -s Xdir1 Xlink")
+    end
     eq(1, eval("isdirectory('Xdir1')"))
     eq(1, eval("isdirectory('Xlink')"))
     -- Delete the link, not the directory
@@ -78,7 +90,11 @@ describe('Test for delete()', function()
       w Xdir3/subdir/Xfile
       w Xdir4/Xfile
       close
-      silent !ln -s ../Xdir4 Xdir3/Xlink
+      if has('win32')
+        silent !mklink /j Xdir3\Xlink Xdir4
+      else
+        silent !ln -s ../Xdir4 Xdir3/Xlink
+      endif
     ]])
 
     eq(1, eval("isdirectory('Xdir3')"))

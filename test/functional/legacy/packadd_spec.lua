@@ -1,7 +1,7 @@
 -- Tests for 'packpath' and :packadd
 
 local helpers = require('test.functional.helpers')(after_each)
-local clear, source, execute = helpers.clear, helpers.source, helpers.execute
+local clear, source, command = helpers.clear, helpers.source, helpers.command
 local call, eq, nvim = helpers.call, helpers.eq, helpers.meths
 local feed = helpers.feed
 
@@ -9,17 +9,19 @@ local function expected_empty()
   eq({}, nvim.get_vvar('errors'))
 end
 
-if helpers.pending_win32(pending) then return end
-
 describe('packadd', function()
   before_each(function()
     clear()
 
     source([=[
+      func Escape(s)
+        return escape(a:s, '\~')
+      endfunc
+
       func SetUp()
-        let s:topdir = expand('%:p:h') . '/Xdir'
+        let s:topdir = expand(getcwd() . '/Xdir')
         exe 'set packpath=' . s:topdir
-        let s:plugdir = s:topdir . '/pack/mine/opt/mytest'
+        let s:plugdir = expand(s:topdir . '/pack/mine/opt/mytest')
       endfunc
 
       func TearDown()
@@ -27,12 +29,25 @@ describe('packadd', function()
       endfunc
 
       func Test_packadd()
+        if !exists('s:plugdir')
+          echomsg 'when running this test manually, call SetUp() first'
+          return
+        endif
+
         call mkdir(s:plugdir . '/plugin/also', 'p')
         call mkdir(s:plugdir . '/ftdetect', 'p')
         call mkdir(s:plugdir . '/after', 'p')
         set rtp&
         let rtp = &rtp
         filetype on
+
+        let rtp_entries = split(rtp, ',')
+        for entry in rtp_entries
+          if entry =~? '\<after\>'
+            let first_after_entry = entry
+            break
+          endif
+        endfor
 
         exe 'split ' . s:plugdir . '/plugin/test.vim'
         call setline(1, 'let g:plugin_works = 42')
@@ -52,12 +67,45 @@ describe('packadd', function()
         call assert_equal(77, g:plugin_also_works)
         call assert_true(17, g:ftdetect_works)
         call assert_true(len(&rtp) > len(rtp))
-        call assert_true(&rtp =~ (s:plugdir . '\($\|,\)'))
-        call assert_true(&rtp =~ (s:plugdir . '/after$'))
+        call assert_match(Escape(s:plugdir) . '\($\|,\)', &rtp)
+
+        let new_after = match(&rtp, Escape(expand(s:plugdir . '/after') . ','))
+        let forwarded = substitute(first_after_entry, '\\', '[/\\\\]', 'g')
+        let old_after = match(&rtp, ',' . escape(forwarded, '~') . '\>')
+        call assert_true(new_after > 0, 'rtp is ' . &rtp)
+        call assert_true(old_after > 0, 'match ' . forwarded . ' in ' . &rtp)
+        call assert_true(new_after < old_after, 'rtp is ' . &rtp)
+
+        " NOTE: '/.../opt/myte' forwardly matches with '/.../opt/mytest'
+        call mkdir(fnamemodify(s:plugdir, ':h') . '/myte', 'p')
+        let rtp = &rtp
+        packadd myte
+
+        " Check the path of 'myte' is added
+        call assert_true(len(&rtp) > len(rtp))
+        call assert_match(Escape(s:plugdir) . '\($\|,\)', &rtp)
 
         " Check exception
         call assert_fails("packadd directorynotfound", 'E919:')
         call assert_fails("packadd", 'E471:')
+      endfunc
+
+      func Test_packadd_start()
+        let plugdir = expand(s:topdir . '/pack/mine/start/other')
+        call mkdir(plugdir . '/plugin', 'p')
+        set rtp&
+        let rtp = &rtp
+        filetype on
+
+        exe 'split ' . plugdir . '/plugin/test.vim'
+        call setline(1, 'let g:plugin_works = 24')
+        wq
+
+        packadd other
+
+        call assert_equal(24, g:plugin_works)
+        call assert_true(len(&rtp) > len(rtp))
+        call assert_match(Escape(plugdir) . '\($\|,\)', &rtp)
       endfunc
 
       func Test_packadd_noload()
@@ -74,13 +122,91 @@ describe('packadd', function()
         packadd! mytest
 
         call assert_true(len(&rtp) > len(rtp))
-        call assert_true(&rtp =~ (s:plugdir . '\($\|,\)'))
+        call assert_match(Escape(s:plugdir) . '\($\|,\)', &rtp)
         call assert_equal(0, g:plugin_works)
 
         " check the path is not added twice
         let new_rtp = &rtp
         packadd! mytest
         call assert_equal(new_rtp, &rtp)
+      endfunc
+
+      func Test_packadd_symlink_dir()
+        let top2_dir = expand(s:topdir . '/Xdir2')
+        let real_dir = expand(s:topdir . '/Xsym')
+        call mkdir(real_dir, 'p')
+        if has('win32')
+          exec "silent! !mklink /d" top2_dir "Xsym"
+        else
+          exec "silent! !ln -s Xsym" top2_dir
+        endif
+        let &rtp = top2_dir . ',' . expand(top2_dir . '/after')
+        let &packpath = &rtp
+
+        let s:plugdir = expand(top2_dir . '/pack/mine/opt/mytest')
+        call mkdir(s:plugdir . '/plugin', 'p')
+
+        exe 'split ' . s:plugdir . '/plugin/test.vim'
+        call setline(1, 'let g:plugin_works = 44')
+        wq
+        let g:plugin_works = 0
+
+        packadd mytest
+
+        " Must have been inserted in the middle, not at the end
+        call assert_match(Escape(expand('/pack/mine/opt/mytest').','), &rtp)
+        call assert_equal(44, g:plugin_works)
+
+        " No change when doing it again.
+        let rtp_before = &rtp
+        packadd mytest
+        call assert_equal(rtp_before, &rtp)
+
+        set rtp&
+        let rtp = &rtp
+        exec "silent !" (has('win32') ? "rd /q/s" : "rm") top2_dir
+      endfunc
+
+      func Test_packadd_symlink_dir2()
+        let top2_dir = expand(s:topdir . '/Xdir2')
+        let real_dir = expand(s:topdir . '/Xsym/pack')
+        call mkdir(top2_dir, 'p')
+        call mkdir(real_dir, 'p')
+        let &rtp = top2_dir . ',' . top2_dir . '/after'
+        let &packpath = &rtp
+
+        if has('win32')
+          exec "silent! !mklink /d" top2_dir "Xsym"
+        else
+          exec "silent !ln -s ../Xsym/pack"  top2_dir . '/pack'
+        endif
+        let s:plugdir = expand(top2_dir . '/pack/mine/opt/mytest')
+        call mkdir(s:plugdir . '/plugin', 'p')
+
+        exe 'split ' . s:plugdir . '/plugin/test.vim'
+        call setline(1, 'let g:plugin_works = 48')
+        wq
+        let g:plugin_works = 0
+
+        packadd mytest
+
+        " Must have been inserted in the middle, not at the end
+        call assert_match(Escape(expand('/Xdir2/pack/mine/opt/mytest').','), &rtp)
+        call assert_equal(48, g:plugin_works)
+
+        " No change when doing it again.
+        let rtp_before = &rtp
+        packadd mytest
+        call assert_equal(rtp_before, &rtp)
+
+        set rtp&
+        let rtp = &rtp
+        if has('win32')
+          exec "silent !rd /q/s" top2_dir
+        else
+          exec "silent !rm" top2_dir . '/pack'
+          exec "silent !rmdir" top2_dir
+        endif
       endfunc
 
       func Test_packloadall()
@@ -137,10 +263,10 @@ describe('packadd', function()
 
         helptags ALL
 
-        let tags1 = readfile(docdir1 . '/tags') 
-        call assert_true(tags1[0] =~ 'look-here')
-        let tags2 = readfile(docdir2 . '/tags') 
-        call assert_true(tags2[0] =~ 'look-away')
+        let tags1 = readfile(docdir1 . '/tags')
+        call assert_match('look-here', tags1[0])
+        let tags2 = readfile(docdir2 . '/tags')
+        call assert_match('look-away', tags2[0])
       endfunc
 
       func Test_colorscheme()
@@ -227,6 +353,11 @@ describe('packadd', function()
     expected_empty()
   end)
 
+  it('works with symlinks', function()
+    call('Test_packadd_symlink_dir')
+    expected_empty()
+  end)
+
   it('works with :packloadall', function()
     call('Test_packloadall')
     expected_empty()
@@ -247,6 +378,11 @@ describe('packadd', function()
     expected_empty()
   end)
 
+  it('loads packages from "start" directory', function()
+    call('Test_packadd_start')
+    expected_empty()
+  end)
+
   describe('command line completion', function()
     local Screen = require('test.functional.ui.screen')
     local screen
@@ -263,12 +399,12 @@ describe('packadd', function()
         [2] = {bold = true, reverse = true}
       })
 
-      execute([[let optdir1 = &packpath . '/pack/mine/opt']])
-      execute([[let optdir2 = &packpath . '/pack/candidate/opt']])
-      execute([[call mkdir(optdir1 . '/pluginA', 'p')]])
-      execute([[call mkdir(optdir1 . '/pluginC', 'p')]])
-      execute([[call mkdir(optdir2 . '/pluginB', 'p')]])
-      execute([[call mkdir(optdir2 . '/pluginC', 'p')]])
+      command([[let optdir1 = &packpath . '/pack/mine/opt']])
+      command([[let optdir2 = &packpath . '/pack/candidate/opt']])
+      command([[call mkdir(optdir1 . '/pluginA', 'p')]])
+      command([[call mkdir(optdir1 . '/pluginC', 'p')]])
+      command([[call mkdir(optdir2 . '/pluginB', 'p')]])
+      command([[call mkdir(optdir2 . '/pluginC', 'p')]])
     end)
 
     it('works', function()

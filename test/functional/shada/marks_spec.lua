@@ -9,18 +9,20 @@ local shada_helpers = require('test.functional.shada.helpers')
 local reset, set_additional_cmd, clear =
   shada_helpers.reset, shada_helpers.set_additional_cmd,
   shada_helpers.clear
+local add_argv = shada_helpers.add_argv
+local nvim_argv = shada_helpers.nvim_argv
 
 local nvim_current_line = function()
   return curwinmeths.get_cursor()[1]
 end
 
-if helpers.pending_win32(pending) then return end
-
 describe('ShaDa support code', function()
   local testfilename = 'Xtestfile-functional-shada-marks'
   local testfilename_2 = 'Xtestfile-functional-shada-marks-2'
+  local non_existent_testfilename = testfilename .. '.nonexistent'
   before_each(function()
     reset()
+    os.remove(non_existent_testfilename)
     local fd = io.open(testfilename, 'w')
     fd:write('test\n')
     fd:write('test2\n')
@@ -153,6 +155,19 @@ describe('ShaDa support code', function()
     eq(saved, redir_exec('jumps'))
   end)
 
+  it('when dumping jump list also dumps current position', function()
+    nvim_command('edit ' .. testfilename)
+    nvim_command('normal! G')
+    nvim_command('split ' .. testfilename_2)
+    nvim_command('normal! G')
+    nvim_command('wshada')
+    nvim_command('quit')
+    nvim_command('rshada')
+    nvim_command('normal! \15')  -- <C-o>
+    eq(testfilename_2, funcs.bufname('%'))
+    eq({2, 0}, curwinmeths.get_cursor())
+  end)
+
   it('is able to dump and restore jump list with different times (slow!)',
   function()
     nvim_command('edit ' .. testfilename_2)
@@ -202,5 +217,24 @@ describe('ShaDa support code', function()
     nvim_command('normal! g;')
     nvim_command('" sync 2')
     eq(2, nvim_current_line())
+  end)
+
+  -- -c temporary sets lnum to zero to make `+/pat` work, so calling setpcmark()
+  -- during -c used to add item with zero lnum to jump list.
+  it('does not create incorrect file for non-existent buffers when writing from -c',
+  function()
+    add_argv('--cmd', 'silent edit ' .. non_existent_testfilename, '-c', 'qall')
+    local argv = nvim_argv(nil, false) -- no --embed
+    eq('', funcs.system(argv))
+    eq(0, exc_exec('rshada'))
+  end)
+
+  it('does not create incorrect file for non-existent buffers opened from -c',
+  function()
+    add_argv('-c', 'silent edit ' .. non_existent_testfilename,
+             '-c', 'autocmd VimEnter * qall')
+    local argv = nvim_argv(nil, false) -- no --embed
+    eq('', funcs.system(argv))
+    eq(0, exc_exec('rshada'))
   end)
 end)

@@ -7,6 +7,12 @@
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/dispatch.h"
 #include "nvim/bufhl_defs.h"
+#include "nvim/highlight_defs.h"
+
+#if defined(__NetBSD__)
+# undef uint64_t
+# define uint64_t uint64_t
+#endif
 
 #define MAP_DECLS(T, U) \
   KHASH_DECLARE(T##_##U##_map, T, U) \
@@ -25,13 +31,13 @@
   void map_##T##_##U##_clear(Map(T, U) *map);
 
 MAP_DECLS(int, int)
-MAP_DECLS(cstr_t, uint64_t)
 MAP_DECLS(cstr_t, ptr_t)
 MAP_DECLS(ptr_t, ptr_t)
 MAP_DECLS(uint64_t, ptr_t)
 MAP_DECLS(handle_T, ptr_t)
 MAP_DECLS(String, MsgpackRpcRequestHandler)
-MAP_DECLS(linenr_T, bufhl_vec_T)
+MAP_DECLS(HlEntry, int)
+MAP_DECLS(String, handle_T)
 
 #define map_new(T, U) map_##T##_##U##_new
 #define map_free(T, U) map_##T##_##U##_free

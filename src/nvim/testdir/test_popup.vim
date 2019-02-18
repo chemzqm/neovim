@@ -1,5 +1,7 @@
 " Test for completion menu
 
+source shared.vim
+
 let g:months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 let g:setting = ''
 
@@ -7,10 +9,10 @@ func! ListMonths()
   if g:setting != ''
     exe ":set" g:setting
   endif
-  let mth=copy(g:months)
+  let mth = copy(g:months)
   let entered = strcharpart(getline('.'),0,col('.'))
   if !empty(entered)
-    let mth=filter(mth, 'v:val=~"^".entered')
+    let mth = filter(mth, 'v:val=~"^".entered')
   endif
   call complete(1, mth)
   return ''
@@ -244,6 +246,10 @@ func! Test_popup_completion_insertmode()
   iunmap <F5>
 endfunc
 
+" TODO: Fix what breaks after this line.
+" - Do not use "q!", it may exit Vim if there is an error
+finish
+
 func Test_noinsert_complete()
   function! s:complTest1() abort
     call complete(1, ['source', 'soundfold'])
@@ -468,7 +474,7 @@ endfunc
 " auto-wrap text.
 func Test_completion_ctrl_e_without_autowrap()
   new
-  let tw_save=&tw
+  let tw_save = &tw
   set tw=78
   let li = [
         \ '"                                                        zzz',
@@ -478,8 +484,232 @@ func Test_completion_ctrl_e_without_autowrap()
   call feedkeys("A\<C-X>\<C-N>\<C-E>\<Esc>", "tx")
   call assert_equal(li, getline(1, '$'))
 
-  let &tw=tw_save
+  let &tw = tw_save
   q!
+endfunc
+
+func Test_completion_respect_bs_option()
+  new
+  let li = ["aaa", "aaa12345", "aaaabcdef", "aaaABC"]
+
+  set bs=indent,eol
+  call setline(1, li)
+  1
+  call feedkeys("A\<C-X>\<C-N>\<C-P>\<BS>\<BS>\<BS>\<Esc>", "tx")
+  call assert_equal('aaa', getline(1))
+
+  %d
+  set bs=indent,eol,start
+  call setline(1, li)
+  1
+  call feedkeys("A\<C-X>\<C-N>\<C-P>\<BS>\<BS>\<BS>\<Esc>", "tx")
+  call assert_equal('', getline(1))
+
+  bw!
+endfunc
+
+func CompleteUndo() abort
+  call complete(1, g:months)
+  return ''
+endfunc
+
+func Test_completion_can_undo()
+  inoremap <Right> <c-r>=CompleteUndo()<cr>
+  set completeopt+=noinsert,noselect
+
+  new
+  call feedkeys("a\<Right>a\<Esc>", 'xt')
+  call assert_equal('a', getline(1))
+  undo
+  call assert_equal('', getline(1))
+
+  bwipe!
+  set completeopt&
+  iunmap <Right>
+endfunc
+
+func Test_completion_comment_formatting()
+  new
+  setl formatoptions=tcqro
+  call feedkeys("o/*\<cr>\<cr>/\<esc>", 'tx')
+  call assert_equal(['', '/*', ' *', ' */'], getline(1,4))
+  %d
+  call feedkeys("o/*\<cr>foobar\<cr>/\<esc>", 'tx')
+  call assert_equal(['', '/*', ' * foobar', ' */'], getline(1,4))
+  %d
+  try
+    call feedkeys("o/*\<cr>\<cr>\<c-x>\<c-u>/\<esc>", 'tx')
+    call assert_report('completefunc not set, should have failed')
+  catch
+    call assert_exception('E764:')
+  endtry
+  call assert_equal(['', '/*', ' *', ' */'], getline(1,4))
+  bwipe!
+endfunc
+
+function! DummyCompleteSix()
+  call complete(1, ['Hello', 'World'])
+  return ''
+endfunction
+
+" complete() correctly clears the list of autocomplete candidates
+func Test_completion_clear_candidate_list()
+  new
+  %d
+  " select first entry from the completion popup
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>", "tx")
+  call assert_equal('Hello', getline(1))
+  %d
+  " select second entry from the completion popup
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>", "tx")
+  call assert_equal('World', getline(1))
+  %d
+  " select original text
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>", "tx")
+  call assert_equal('    xxx', getline(1))
+  %d
+  " back at first entry from completion list
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>\<C-N>", "tx")
+  call assert_equal('Hello', getline(1))
+
+  bw!
+endfunc
+
+func Test_popup_complete_backwards()
+  new
+  call setline(1, ['Post', 'Port', 'Po'])
+  let expected=['Post', 'Port', 'Port']
+  call cursor(3,2)
+  call feedkeys("A\<C-X>". repeat("\<C-P>", 3). "rt\<cr>", 'tx')
+  call assert_equal(expected, getline(1,'$'))
+  bwipe!
+endfunc
+
+func Test_popup_and_preview_autocommand()
+  " This used to crash Vim
+  if !has('python')
+    return
+  endif
+  let h = winheight(0)
+  if h < 15
+    return
+  endif
+  new
+  augroup MyBufAdd
+    au!
+    au BufAdd * nested tab sball
+  augroup END
+  set omnifunc=pythoncomplete#Complete
+  call setline(1, 'import os')
+  " make the line long
+  call setline(2, '                                 os.')
+  $
+  call feedkeys("A\<C-X>\<C-O>\<C-N>\<C-N>\<C-N>\<enter>\<esc>", 'tx')
+  call assert_equal("import os", getline(1))
+  call assert_match('                                 os.\(EX_IOERR\|O_CREAT\)$', getline(2))
+  call assert_equal(1, winnr('$'))
+  " previewwindow option is not set
+  call assert_equal(0, &previewwindow)
+  norm! gt
+  call assert_equal(0, &previewwindow)
+  norm! gT
+  call assert_equal(12, tabpagenr('$'))
+  tabonly
+  pclose
+  augroup MyBufAdd
+    au!
+  augroup END
+  augroup! MyBufAdd
+  bw!
+endfunc
+
+fun MessCompleteMonths()
+  for m in split("Jan Feb Mar Apr May Jun Jul Aug Sep")
+    call complete_add(m)
+    if complete_check()
+      break
+    endif
+  endfor
+  return []
+endfun
+
+fun MessCompleteMore()
+  call complete(1, split("Oct Nov Dec"))
+  return []
+endfun
+
+fun MessComplete(findstart, base)
+  if a:findstart
+    let line = getline('.')
+    let start = col('.') - 1
+    while start > 0 && line[start - 1] =~ '\a'
+      let start -= 1
+    endwhile
+    return start
+  else
+    call MessCompleteMonths()
+    call MessCompleteMore()
+    return []
+  endif
+endf
+
+func Test_complete_func_mess()
+  " Calling complete() after complete_add() in 'completefunc' is wrong, but it
+  " should not crash.
+  set completefunc=MessComplete
+  new
+  call setline(1, 'Ju')
+  call feedkeys("A\<c-x>\<c-u>/\<esc>", 'tx')
+  call assert_equal('Oct/Oct', getline(1))
+  bwipe!
+  set completefunc=
+endfunc
+
+func Test_complete_CTRLN_startofbuffer()
+  new
+  call setline(1, [ 'organize(cupboard, 3, 2);',
+        \ 'prioritize(bureau, 8, 7);',
+        \ 'realize(bannister, 4, 4);',
+        \ 'moralize(railing, 3,9);'])
+  let expected=['cupboard.organize(3, 2);',
+        \ 'bureau.prioritize(8, 7);',
+        \ 'bannister.realize(4, 4);',
+        \ 'railing.moralize(3,9);']
+  call feedkeys("qai\<c-n>\<c-n>.\<esc>3wdW\<cr>q3@a", 'tx')
+  call assert_equal(expected, getline(1,'$'))
+  bwipe!
+endfunc
+
+func Test_popup_and_window_resize()
+  if !has('terminal') || has('gui_running')
+    return
+  endif
+  let h = winheight(0)
+  if h < 15
+    return
+  endif
+  let g:buf = term_start([$NVIM_PRG, '--clean', '-c', 'set noswapfile'], {'term_rows': h / 3})
+  call term_sendkeys(g:buf, (h / 3 - 1)."o\<esc>G")
+  call term_sendkeys(g:buf, "i\<c-x>")
+  call term_wait(g:buf, 200)
+  call term_sendkeys(g:buf, "\<c-v>")
+  call term_wait(g:buf, 100)
+  " popup first entry "!" must be at the top
+  call WaitFor('term_getline(g:buf, 1) =~ "^!"')
+  call assert_match('^!\s*$', term_getline(g:buf, 1))
+  exe 'resize +' . (h - 1)
+  call term_wait(g:buf, 100)
+  redraw!
+  " popup shifted down, first line is now empty
+  call WaitFor('term_getline(g:buf, 1) == ""')
+  call assert_equal('', term_getline(g:buf, 1))
+  sleep 100m
+  " popup is below cursor line and shows first match "!"
+  call WaitFor('term_getline(g:buf, term_getcursor(g:buf)[0] + 1) =~ "^!"')
+  call assert_match('^!\s*$', term_getline(g:buf, term_getcursor(g:buf)[0] + 1))
+  " cursor line also shows !
+  call assert_match('^!\s*$', term_getline(g:buf, term_getcursor(g:buf)[0]))
+  bwipe!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

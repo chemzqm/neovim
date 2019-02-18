@@ -8,6 +8,10 @@ local curwinmeths = helpers.curwinmeths
 local funcs = helpers.funcs
 local request = helpers.request
 local NIL = helpers.NIL
+local meth_pcall = helpers.meth_pcall
+local meths = helpers.meths
+local command = helpers.command
+local expect_err = helpers.expect_err
 
 -- check if str is visible at the beginning of some line
 local function is_visible(str)
@@ -28,7 +32,7 @@ local function is_visible(str)
     return false
 end
 
-describe('api/win', function()
+describe('API/win', function()
   before_each(clear)
 
   describe('get_buf', function()
@@ -42,6 +46,21 @@ describe('api/win', function()
     end)
   end)
 
+  describe('set_buf', function()
+    it('works', function()
+      nvim('command', 'new')
+      local windows = nvim('list_wins')
+      neq(window('get_buf', windows[2]), window('get_buf', windows[1]))
+      window('set_buf', windows[2], window('get_buf', windows[1]))
+      eq(window('get_buf', windows[2]), window('get_buf', windows[1]))
+    end)
+
+    it('validates args', function()
+      expect_err('Invalid buffer id$', window, 'set_buf', nvim('get_current_win'), 23)
+      expect_err('Invalid window id$', window, 'set_buf', 23, nvim('get_current_buf'))
+    end)
+  end)
+
   describe('{get,set}_cursor', function()
     it('works', function()
       eq({1, 0}, curwin('get_cursor'))
@@ -51,6 +70,12 @@ describe('api/win', function()
       curwin('set_cursor', {2, 6})
       nvim('command', 'normal i dumb')
       eq('typing\n  some dumb text', curbuf_contents())
+    end)
+
+    it('does not leak memory when using invalid window ID with invalid pos',
+    function()
+      eq({false, 'Invalid window id'},
+         meth_pcall(meths.win_set_cursor, 1, {"b\na"}))
     end)
 
     it('updates the screen, and also when the window is unfocused', function()
@@ -99,6 +124,29 @@ describe('api/win', function()
       neq(win, curwin())
     end)
 
+    it('remembers what column it wants to be in', function()
+      insert("first line")
+      feed('o<esc>')
+      insert("second line")
+
+      feed('gg')
+      wait() -- let nvim process the 'gg' command
+
+      -- cursor position is at beginning
+      local win = curwin()
+      eq({1, 0}, window('get_cursor', win))
+
+      -- move cursor to column 5
+      window('set_cursor', win, {1, 5})
+
+      -- move down a line
+      feed('j')
+      wait() -- let nvim process the 'j' command
+
+      -- cursor is still in column 5
+      eq({2, 5}, window('get_cursor', win))
+    end)
+
   end)
 
   describe('{get,set}_height', function()
@@ -137,6 +185,11 @@ describe('api/win', function()
       eq(1, funcs.exists('w:lua'))
       curwinmeths.del_var('lua')
       eq(0, funcs.exists('w:lua'))
+      eq({false, 'Key not found: lua'}, meth_pcall(curwinmeths.del_var, 'lua'))
+      curwinmeths.set_var('lua', 1)
+      command('lockvar w:lua')
+      eq({false, 'Key is locked: lua'}, meth_pcall(curwinmeths.del_var, 'lua'))
+      eq({false, 'Key is locked: lua'}, meth_pcall(curwinmeths.set_var, 'lua', 1))
     end)
 
     it('window_set_var returns the old value', function()

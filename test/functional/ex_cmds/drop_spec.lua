@@ -1,6 +1,7 @@
 local helpers = require('test.functional.helpers')(after_each)
+local command = helpers.command
 local Screen = require('test.functional.ui.screen')
-local clear, feed, execute = helpers.clear, helpers.feed, helpers.execute
+local clear, feed, feed_command = helpers.clear, helpers.feed, helpers.feed_command
 
 describe(":drop", function()
   local screen
@@ -15,7 +16,7 @@ describe(":drop", function()
       [2] = {reverse = true},
       [3] = {bold = true},
     })
-    execute("set laststatus=2")
+    command("set laststatus=2 shortmess-=F")
   end)
 
   after_each(function()
@@ -23,7 +24,7 @@ describe(":drop", function()
   end)
 
   it("works like :e when called with only one window open", function()
-    execute("drop tmp1.vim")
+    feed_command("drop tmp1.vim")
     screen:expect([[
       ^                                   |
       {0:~                                  }|
@@ -39,39 +40,39 @@ describe(":drop", function()
   end)
 
   it("switches to an open window showing the buffer", function()
-    execute("edit tmp1")
-    execute("vsplit")
-    execute("edit tmp2")
-    execute("drop tmp1")
+    feed_command("edit tmp1")
+    feed_command("vsplit")
+    feed_command("edit tmp2")
+    feed_command("drop tmp1")
     screen:expect([[
-                    {2:|}^                    |
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
-      {0:~             }{2:|}{0:~                   }|
+                    {2:│}^                    |
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
+      {0:~             }{2:│}{0:~                   }|
       {2:tmp2           }{1:tmp1                }|
       :drop tmp1                         |
     ]])
   end)
 
   it("splits off a new window when a buffer can't be abandoned", function()
-    execute("edit tmp1")
-    execute("vsplit")
-    execute("edit tmp2")
+    feed_command("edit tmp1")
+    feed_command("vsplit")
+    feed_command("edit tmp2")
     feed("iABC<esc>")
-    execute("drop tmp3")
+    feed_command("drop tmp3")
     screen:expect([[
-      ^                    {2:|}              |
-      {0:~                   }{2:|}{0:~             }|
-      {0:~                   }{2:|}{0:~             }|
-      {0:~                   }{2:|}{0:~             }|
-      {1:tmp3                }{2:|}{0:~             }|
-      ABC                 {2:|}{0:~             }|
-      {0:~                   }{2:|}{0:~             }|
-      {0:~                   }{2:|}{0:~             }|
+      ^                    {2:│}              |
+      {0:~                   }{2:│}{0:~             }|
+      {0:~                   }{2:│}{0:~             }|
+      {0:~                   }{2:│}{0:~             }|
+      {1:tmp3                }{2:│}{0:~             }|
+      ABC                 {2:│}{0:~             }|
+      {0:~                   }{2:│}{0:~             }|
+      {0:~                   }{2:│}{0:~             }|
       {2:tmp2 [+]             tmp1          }|
       "tmp3" [New File]                  |
     ]])

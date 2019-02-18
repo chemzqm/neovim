@@ -20,6 +20,7 @@ function! spellfile#LoadFile(lang)
     endif
     return
   endif
+  let lang = tolower(a:lang)
 
   " If the URL changes we try all files again.
   if s:spellfile_URL != g:spellfile_URL
@@ -28,13 +29,13 @@ function! spellfile#LoadFile(lang)
   endif
 
   " I will say this only once!
-  if has_key(s:donedict, a:lang . &enc)
+  if has_key(s:donedict, lang . &enc)
     if &verbose
       echomsg 'spellfile#LoadFile(): Tried this language/encoding before.'
     endif
     return
   endif
-  let s:donedict[a:lang . &enc] = 1
+  let s:donedict[lang . &enc] = 1
 
   " Find spell directories we can write in.
   let [dirlist, dirchoices] = spellfile#GetDirChoices()
@@ -88,13 +89,13 @@ function! spellfile#LoadFile(lang)
         endif
       endif
       if newbufnr == winbufnr(0)
-        " We are back the old buffer, remove any (half-finished) download.
-        g/^/d_
+        " We are back to the old buffer, remove any (half-finished) download.
+        keeppatterns g/^/d_
       else
         let newbufnr = winbufnr(0)
       endif
 
-      let fname = a:lang . '.ascii.spl'
+      let fname = lang . '.ascii.spl'
       echo 'Could not find it, trying ' . fname . '...'
       call spellfile#Nread(fname)
       if getline(2) !~ 'VIMspell'
@@ -127,7 +128,7 @@ function! spellfile#LoadFile(lang)
       exe "write " . dirname . '/' . fname
 
       " Also download the .sug file.
-      g/^/d_
+      keeppatterns g/^/d_
       let fname = substitute(fname, '\.spl$', '.sug', '')
       echo 'Downloading ' . fname . '...'
       call spellfile#Nread(fname)
@@ -197,7 +198,7 @@ function! spellfile#WritableSpellDir()
   " Always use the $XDG_DATA_HOME/nvim/site directory
   if exists('$XDG_DATA_HOME')
     return $XDG_DATA_HOME . "/nvim/site/spell"
-  else
+  elseif !(has('win32') || has('win64'))
     return $HOME . "/.local/share/nvim/site/spell"
   endif
   for dir in split(&rtp, ',')

@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 /// @file digraph.c
 ///
 /// code for digraphs
@@ -790,6 +793,7 @@ static digr_T digraphdefault[] =
   { '/', '-', 0x2020 },
   { '/', '=', 0x2021 },
   { '.', '.', 0x2025 },
+  { ',', '.', 0x2026 },
   { '%', '0', 0x2030 },
   { '1', '\'', 0x2032 },
   { '2', '\'', 0x2033 },
@@ -1355,6 +1359,12 @@ static digr_T digraphdefault[] =
   { 'f', 't', 0xfb05 },
   { 's', 't', 0xfb06 },
 
+  // extra alternatives, easier to remember
+  { 'W', '`', 0x1e80 },
+  { 'w', '`', 0x1e81 },
+  { 'Y', '`', 0x1ef2 },
+  { 'y', '`', 0x1ef3 },
+
   // Vim 5.x compatible digraphs that don't conflict with the above
   { '~', '!', 161 },  // ¡
   { 'c', '|', 162 },  // ¢
@@ -1387,7 +1397,7 @@ static digr_T digraphdefault[] =
   { 'O', '`', 210 },  // Ò
   { 'O', '^', 212 },  // Ô
   { 'O', '~', 213 },  // Õ
-  { '/', '\\', 215 }, // × - multiplication symbol in ISO 8859-1
+  { '/', '\\', 215 },  // × - multiplication symbol in ISO 8859-1
   { 'U', '`', 217 },  // Ù
   { 'U', '^', 219 },  // Û
   { 'I', 'p', 222 },  // Þ
@@ -1438,6 +1448,33 @@ int do_digraph(int c)
   return c;
 }
 
+/// Find a digraph for "val".  If found return the string to display it.
+/// If not found return NULL.
+char_u *get_digraph_for_char(int val)
+{
+  digr_T *dp;
+  static char_u r[3];
+
+  for (int use_defaults = 0; use_defaults <= 1; use_defaults++) {
+    if (use_defaults == 0) {
+      dp = (digr_T *)user_digraphs.ga_data;
+    } else {
+      dp = digraphdefault;
+    }
+    for (int i = 0;
+         use_defaults ? dp->char1 != NUL : i < user_digraphs.ga_len; i++) {
+      if (dp->result == val) {
+        r[0] = dp->char1;
+        r[1] = dp->char2;
+        r[2] = NUL;
+        return r;
+      }
+      dp++;
+    }
+  }
+  return NULL;
+}
+
 /// Get a digraph.  Used after typing CTRL-K on the command line or in normal
 /// mode.
 ///
@@ -1448,10 +1485,8 @@ int get_digraph(int cmdline)
 {
   int cc;
   no_mapping++;
-  allow_keys++;
   int c = plain_vgetc();
   no_mapping--;
-  allow_keys--;
 
   if (c != ESC) {
     // ESC cancels CTRL-K
@@ -1468,10 +1503,8 @@ int get_digraph(int cmdline)
       add_to_showcmd(c);
     }
     no_mapping++;
-    allow_keys++;
     cc = plain_vgetc();
     no_mapping--;
-    allow_keys--;
 
     if (cc != ESC) {
       // ESC cancels CTRL-K
@@ -1520,34 +1553,6 @@ static int getexactdigraph(int char1, int char2, int meta_char)
     }
   }
 
-  if ((retval != 0) && !enc_utf8) {
-    char_u buf[6], *to;
-    vimconv_T vc;
-
-    // Convert the Unicode digraph to 'encoding'.
-    int i = utf_char2bytes(retval, buf);
-    retval = 0;
-    vc.vc_type = CONV_NONE;
-
-    if (convert_setup(&vc, (char_u *)"utf-8", p_enc) == OK) {
-      vc.vc_fail = true;
-      assert(i >= 0);
-      size_t len = (size_t)i;
-      to = string_convert(&vc, buf, &len);
-
-      if (to != NULL) {
-        retval = (*mb_ptr2char)(to);
-        xfree(to);
-      }
-      (void)convert_setup(&vc, NULL, NULL);
-    }
-  }
-
-  // Ignore multi-byte characters when not in multi-byte mode.
-  if (!has_mbyte && (retval > 0xff)) {
-    retval = 0;
-  }
-
   if (retval == 0) {
     // digraph deleted or not found
     if ((char1 == ' ') && meta_char) {
@@ -1573,7 +1578,8 @@ int getdigraph(int char1, int char2, int meta_char)
 
   if (((retval = getexactdigraph(char1, char2, meta_char)) == char2)
       && (char1 != char2)
-      && ((retval = getexactdigraph(char2, char1, meta_char)) == char1)) {
+      && ((retval = getexactdigraph(char2, char1, meta_char))  // -V764
+          == char1)) {
     return char2;
   }
   return retval;
@@ -1653,8 +1659,7 @@ void listdigraphs(void)
     tmp.result = getexactdigraph(tmp.char1, tmp.char2, FALSE);
 
     if ((tmp.result != 0)
-        && (tmp.result != tmp.char2)
-        && (has_mbyte || (tmp.result <= 255))) {
+        && (tmp.result != tmp.char2)) {
       printdigraph(&tmp);
     }
     dp++;
@@ -1667,9 +1672,6 @@ void listdigraphs(void)
     os_breakcheck();
     dp++;
   }
-  // clear screen, because some digraphs may be wrong, in which case we messed
-  // up ScreenLines
-  must_redraw = CLEAR;
 }
 
 static void printdigraph(digr_T *dp)
@@ -1679,11 +1681,7 @@ static void printdigraph(digr_T *dp)
 
   int list_width;
 
-  if ((dy_flags & DY_UHEX) || has_mbyte) {
-    list_width = 13;
-  } else {
-    list_width = 11;
-  }
+  list_width = 13;
 
   if (dp->result != 0) {
     if (msg_col > Columns - list_width) {
@@ -1699,21 +1697,23 @@ static void printdigraph(digr_T *dp)
       }
     }
 
-    p = buf;
+    p = &buf[0];
     *p++ = dp->char1;
     *p++ = dp->char2;
     *p++ = ' ';
+    *p = NUL;
+    msg_outtrans(buf);
+    p = buf;
 
-    if (has_mbyte) {
-      // add a space to draw a composing char on
-      if (enc_utf8 && utf_iscomposing(dp->result)) {
-        *p++ = ' ';
-      }
-      p += (*mb_char2bytes)(dp->result, p);
-    } else {
-      *p++ = (char_u)dp->result;
+    // add a space to draw a composing char on
+    if (utf_iscomposing(dp->result)) {
+      *p++ = ' ';
     }
+    p += utf_char2bytes(dp->result, p);
 
+    *p = NUL;
+    msg_outtrans_attr(buf, HL_ATTR(HLF_8));
+    p = buf;
     if (char2cells(dp->result) == 1) {
       *p++ = ' ';
     }
@@ -1834,18 +1834,28 @@ void ex_loadkeymap(exarg_T *eap)
     xfree(line);
   }
 
-  // setup ":lnoremap" to map the keys
-  for (int i = 0; i < curbuf->b_kmap_ga.ga_len; ++i) {
+  // setup ":lmap" to map the keys
+  for (int i = 0; i < curbuf->b_kmap_ga.ga_len; i++) {
     vim_snprintf((char *)buf, sizeof(buf), "<buffer> %s %s",
                  ((kmap_T *)curbuf->b_kmap_ga.ga_data)[i].from,
                  ((kmap_T *)curbuf->b_kmap_ga.ga_data)[i].to);
-    (void)do_map(2, buf, LANGMAP, FALSE);
+    (void)do_map(0, buf, LANGMAP, false);
   }
 
   p_cpo = save_cpo;
 
   curbuf->b_kmap_state |= KEYMAP_LOADED;
   status_redraw_curbuf();
+}
+
+/// Frees the buf_T.b_kmap_ga field of a buffer.
+void keymap_ga_clear(garray_T *kmap_ga)
+{
+  kmap_T *kp = (kmap_T *)kmap_ga->ga_data;
+  for (int i = 0; i < kmap_ga->ga_len; i++) {
+    xfree(kp[i].from);
+    xfree(kp[i].to);
+  }
 }
 
 /// Stop using 'keymap'.
@@ -1865,12 +1875,11 @@ static void keymap_unload(void)
   // clear the ":lmap"s
   kp = (kmap_T *)curbuf->b_kmap_ga.ga_data;
 
-  for (int i = 0; i < curbuf->b_kmap_ga.ga_len; ++i) {
+  for (int i = 0; i < curbuf->b_kmap_ga.ga_len; i++) {
     vim_snprintf((char *)buf, sizeof(buf), "<buffer> %s", kp[i].from);
-    (void)do_map(1, buf, LANGMAP, FALSE);
-    xfree(kp[i].from);
-    xfree(kp[i].to);
+    (void)do_map(1, buf, LANGMAP, false);
   }
+  keymap_ga_clear(&curbuf->b_kmap_ga);
 
   p_cpo = save_cpo;
 

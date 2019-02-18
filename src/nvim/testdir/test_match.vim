@@ -1,5 +1,5 @@
 " Test for :match, :2match, :3match, clearmatches(), getmatches(), matchadd(),
-" matchaddpos(), matcharg(), matchdelete(), matchstrpos() and setmatches().
+" matchaddpos(), matcharg(), matchdelete(), and setmatches().
 
 function Test_match()
   highlight MyGroup1 term=bold ctermbg=red guibg=red
@@ -150,18 +150,6 @@ function Test_match()
   highlight MyGroup3 NONE
 endfunc
 
-func Test_matchstrpos()
-  call assert_equal(['ing', 4, 7], matchstrpos('testing', 'ing'))
-
-  call assert_equal(['ing', 4, 7], matchstrpos('testing', 'ing', 2))
-
-  call assert_equal(['', -1, -1], matchstrpos('testing', 'ing', 5))
-
-  call assert_equal(['ing', 1, 4, 7], matchstrpos(['vim', 'testing', 'execute'], 'ing'))
-
-  call assert_equal(['', -1, -1, -1], matchstrpos(['vim', 'testing', 'execute'], 'img'))
-endfunc
-
 func Test_matchaddpos()
   syntax on
   set hlsearch
@@ -198,6 +186,16 @@ func Test_matchaddpos()
   call assert_equal(screenattr(2,2), screenattr(1,10))
   call assert_notequal(screenattr(2,2), screenattr(1,11))
 
+  " Check overlapping pos
+  call clearmatches()
+  call setline(1, ['1234567890', 'NH'])
+  call matchaddpos('Error', [[1,1,5], [1,3,5], [2,2]])
+  redraw!
+  call assert_notequal(screenattr(2,2), 0)
+  call assert_equal(screenattr(2,2), screenattr(1,5))
+  call assert_equal(screenattr(2,2), screenattr(1,7))
+  call assert_notequal(screenattr(2,2), screenattr(1,8))
+
   nohl
   call clearmatches()
   syntax off
@@ -231,4 +229,4 @@ func Test_matchaddpos_using_negative_priority()
   set hlsearch&
 endfunc
 
-" vim: et ts=2 sw=2
+" vim: shiftwidth=2 sts=2 expandtab

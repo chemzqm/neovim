@@ -1,4 +1,4 @@
-*motion.txt*    For Vim version 7.4.  Last change: 2016 Jul 12
+*motion.txt*    Nvim
 
 
 		  VIM REFERENCE MANUAL    by Bram Moolenaar
@@ -9,16 +9,6 @@ Cursor motions					*cursor-motions* *navigation*
 These commands move the cursor position.  If the new position is off of the
 screen, the screen is scrolled to show the cursor (see also 'scrolljump' and
 'scrolloff' options).
-
-1. Motions and operators	|operator|
-2. Left-right motions		|left-right-motions|
-3. Up-down motions		|up-down-motions|
-4. Word motions			|word-motions|
-5. Text object motions		|object-motions|
-6. Text object selection	|object-select|
-7. Marks			|mark-motions|
-8. Jumps			|jump-motions|
-9. Various motions		|various-motions|
 
 General remarks:
 
@@ -35,6 +25,8 @@ at the keyboard.  Think of j as an arrow pointing downwards.
 The 'virtualedit' option can be set to make it possible to move the cursor to
 positions where there is no character or within a multi-column character (like
 a tab).
+
+                                      Type |gO| to see the table of contents.
 
 ==============================================================================
 1. Motions and operators				*operator*
@@ -192,7 +184,7 @@ l		or					*l*
 
 							*$* *<End>* *<kEnd>*
 $  or <End>		To the end of the line.  When a count is given also go
-			[count - 1] lines downward |inclusive|.
+			[count - 1] lines downward. |inclusive| motion.
 			In Visual mode the cursor goes to just after the last
 			character in the line.
 			When 'virtualedit' is active, "$" may move the cursor
@@ -401,8 +393,7 @@ a range of folded lines.  "b" and "B" move to the start of the first word or
 WORD before the fold.
 
 Special case: "cw" and "cW" are treated like "ce" and "cE" if the cursor is
-on a non-blank.  This is because "cw" is interpreted as change-word, and a
-word does not include the following white space.
+on a non-blank.  This is Vi-compatible, see |cpo-_| to change the behavior.
 
 Another special case: When using the "w" motion in combination with an
 operator and the last word moved over is at the end of a line, the end of
@@ -770,9 +761,8 @@ g'{mark}  g`{mark}
 			Jump to the {mark}, but don't change the jumplist when
 			jumping within the current buffer.  Example: >
 				g`"
-<			jumps to the last known position in a file.  See
-			$VIMRUNTIME/vimrc_example.vim.
-			Also see |:keepjumps|.
+<			jumps to the last known position in a file.
+			See also |:keepjumps|.
 
 						*:marks*
 :marks			List all the current marks (not a motion command).
@@ -895,6 +885,7 @@ was made yet in the current file.
 			then the position can be near the end of what the
 			command changed.  For example when inserting a word,
 			the position will be on the last character.
+			To jump to older changes use |g;|.
 
 							*'(* *`(*
 '(  `(			To the start of the current sentence, like the |(|
@@ -995,12 +986,13 @@ These commands are not marks themselves, but jump to a mark:
 ==============================================================================
 8. Jumps					*jump-motions*
 
-A "jump" is one of the following commands: "'", "`", "G", "/", "?", "n",
-"N", "%", "(", ")", "[[", "]]", "{", "}", ":s", ":tag", "L", "M", "H" and
-the commands that start editing a new file.  If you make the cursor "jump"
-with one of these commands, the position of the cursor before the jump is
+A "jump" is a command that normally moves the cursor several lines away.  If
+you make the cursor "jump" the position of the cursor before the jump is
 remembered.  You can return to that position with the "''" and "``" command,
-unless the line containing that position was changed or deleted.
+unless the line containing that position was changed or deleted.  The
+following commands are "jump" commands: "'", "`", "G", "/", "?", "n", "N",
+"%", "(", ")", "[[", "]]", "{", "}", ":s", ":tag", "L", "M", "H" and the
+commands that start editing a new file. 
 
 							*CTRL-O*
 CTRL-O			Go to [count] Older cursor position in jump list
@@ -1012,6 +1004,9 @@ CTRL-I			Go to [count] newer cursor position in jump list
 
 							*:ju* *:jumps*
 :ju[mps]		Print the jump list (not a motion command).
+
+							*:cle* *:clearjumps*
+:cle[arjumps]		Clear the jump list of the current window.
 
 							*jumplist*
 Jumps are remembered in a jump list.  With the CTRL-O and CTRL-I command you
@@ -1123,7 +1118,7 @@ remembered.
 							*:changes*
 :changes		Print the change list.  A ">" character indicates the
 			current position.  Just after a change it is below the
-			newest entry, indicating that "g;" takes you to the
+			newest entry, indicating that `g;` takes you to the
 			newest entry position.  The first column indicates the
 			count needed to take you to this position.  Example:
 
@@ -1133,8 +1128,8 @@ remembered.
 				    1    14   54 the latest changed line
 				>
 
-			The "3g;" command takes you to line 9.  Then the
-			output of ":changes is:
+			The `3g;` command takes you to line 9.  Then the
+			output of `:changes` is:
 
 				change line  col text ~
 				>   0     9    8 bla bla bla
@@ -1277,7 +1272,10 @@ the current line is included.  You can then use "%" to go to the matching line.
 H			To line [count] from top (Home) of window (default:
 			first line on the window) on the first non-blank
 			character |linewise|.  See also 'startofline' option.
-			Cursor is adjusted for 'scrolloff' option.
+			Cursor is adjusted for 'scrolloff' option, unless an
+			operator is pending, in which case the text may
+			scroll.  E.g. "yH" yanks from the first visible line
+			until the cursor line (inclusive).
 
 						*M*
 M			To Middle line of window, on the first non-blank
@@ -1287,11 +1285,14 @@ M			To Middle line of window, on the first non-blank
 L			To line [count] from bottom of window (default: Last
 			line on the window) on the first non-blank character
 			|linewise|.  See also 'startofline' option.
-			Cursor is adjusted for 'scrolloff' option.
+			Cursor is adjusted for 'scrolloff' option, unless an
+			operator is pending, in which case the text may
+			scroll.  E.g. "yL" yanks from the cursor to the last
+			visible line.
 
 <LeftMouse>		Moves to the position on the screen where the mouse
 			click is |exclusive|.  See also |<LeftMouse>|.  If the
 			position is in a status line, that window is made the
 			active window and the cursor is not moved.
 
- vim:tw=78:ts=8:ft=help:norl:
+ vim:tw=78:ts=8:noet:ft=help:norl:

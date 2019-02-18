@@ -1,52 +1,54 @@
-#
+# vim: noet ts=8
 # Makefile to run all tests for Vim
 #
 
+ifeq ($(OS),Windows_NT)
+  NVIM_PRG ?= ../../../build/bin/nvim.exe
+else
+  NVIM_PRG ?= ../../../build/bin/nvim
+endif
+ROOT := ../../..
+
 export SHELL := sh
+export NVIM_PRG := $(NVIM_PRG)
+export TMPDIR := $(abspath ../../../Xtest-tmpdir)
 
-VIMPROG := ../../../build/bin/nvim
-SCRIPTSOURCE := ../../../runtime
+SCRIPTS_DEFAULT = \
+	test14.out             \
+	test37.out             \
+	test42.out             \
+	test48.out             \
+	test52.out             \
+	test64.out             \
 
-SCRIPTS := \
-           test8.out              \
-           test13.out             \
-           test14.out             \
-           test17.out             \
-           test24.out             \
-           test32.out             \
-           test37.out             \
-           test40.out             \
-           test42.out             \
-           test48.out             \
-           test49.out             \
-           test52.out             \
-           test53.out             \
-           test64.out             \
-           test69.out             \
-           test73.out             \
-           test79.out             \
-           test_marks.out         \
+ifneq ($(OS),Windows_NT)
+  SCRIPTS_DEFAULTS := $(SCRIPTS_DEFAULT) \
+	test17.out             \
+	test49.out             \
 
-# Tests using runtest.vim.vim.
-# Keep test_alot*.res as the last one, sort the others.
-NEW_TESTS = \
-	    test_cmdline.res \
-	    test_cscope.res \
-	    test_diffmode.res \
-	    test_hardcopy.res \
-	    test_help_tagjump.res \
-	    test_history.res \
-	    test_langmap.res \
-	    test_match.res \
-	    test_matchadd_conceal.res \
-	    test_quickfix.res \
-	    test_syntax.res \
-	    test_usercommands.res \
-	    test_timers.res \
-	    test_viml.res \
-	    test_visual.res \
-	    test_window_id.res \
-	    test_alot.res
+endif
+
+SCRIPTS ?= $(SCRIPTS_DEFAULT)
+
+# Tests using runtest.vim.
+NEW_TESTS_ALOT := test_alot_utf8 test_alot
+NEW_TESTS_IN_ALOT := $(shell sed '/^source/ s/^source //;s/\.vim$$//' test_alot*.vim)
+# Ignored tests.
+# test_alot_latin: Nvim does not allow setting encoding.
+# test_arglist: ported to Lua, but kept for easier merging.
+# test_autochdir: ported to Lua, but kept for easier merging.
+# test_eval_func: used as include in old-style test (test_eval.in).
+# test_listlbr: Nvim does not allow setting encoding.
+# test_largefile: uses too much resources to run on CI.
+NEW_TESTS_IGNORE := $(NEW_TESTS_IN_ALOT) $(NEW_TESTS_ALOT) \
+  test_alot_latin \
+  test_arglist \
+  test_autochdir \
+  test_eval_func \
+  test_listlbr \
+  test_largefile \
+
+NEW_TESTS ?= $(addsuffix .res,$(sort $(filter-out $(NEW_TESTS_IGNORE),$(basename $(notdir $(wildcard test_*.vim))))) $(NEW_TESTS_ALOT))
 
 SCRIPTS_GUI := test16.out
 
@@ -66,7 +68,7 @@ ifdef USE_VALGRIND
 	                 $(VALGRIND_TOOL)                       \
 	                 --suppressions=../../.valgrind.supp \
 	                 --error-exitcode=123                   \
-	                 --log-file=valgrind.\%p.$*             \
+	                 --log-file=valgrind-\%p.$*             \
 	                 $(VGDB)                                \
 	                 --trace-children=yes
 else
@@ -84,7 +86,8 @@ nongui: nolog $(SCRIPTS) newtests report
 gui:    nolog $(SCRIPTS) $(SCRIPTS_GUI) newtests report
 
 .gdbinit:
-	echo 'set $$_exitcode = -1\nrun\nif $$_exitcode != -1\n  quit\nend' > .gdbinit
+	@echo "[OLDTEST-PREP] Setting up .gdbinit"
+	@echo 'set $$_exitcode = -1\nrun\nif $$_exitcode != -1\n  quit\nend' > .gdbinit
 
 report:
 	@echo
@@ -97,13 +100,13 @@ report:
 	                 echo ALL DONE;        \
 	             fi"
 
-test1.out: $(VIMPROG)
+test1.out: $(NVIM_PRG)
 
-$(SCRIPTS) $(SCRIPTS_GUI): $(VIMPROG) test1.out
+$(SCRIPTS) $(SCRIPTS_GUI): $(NVIM_PRG) test1.out
 
 RM_ON_RUN   := test.out X* viminfo
 RM_ON_START := test.ok
-RUN_VIM     := VIMRUNTIME=$(SCRIPTSOURCE); export VIMRUNTIME; $(TOOL) $(VIMPROG) -u unix.vim -U NONE -i viminfo --noplugin -s dotest.in
+RUN_VIM     := $(TOOL) $(NVIM_PRG) -u unix.vim -U NONE -i viminfo --headless --noplugin -s dotest.in
 
 clean:
 	-rm -rf *.out          \
@@ -111,6 +114,7 @@ clean:
 	        *.res          \
 	        *.rej          \
 	        *.orig         \
+	        *.tlog         \
 	        test.log       \
 	        messages       \
 	        $(RM_ON_RUN)   \
@@ -119,60 +123,37 @@ clean:
 	        .*.swp         \
 	        .*.swo         \
 	        .gdbinit       \
+	        $(TMPDIR)      \
 	        del
 
 test1.out: .gdbinit test1.in
-	-rm -rf $*.failed $(RM_ON_RUN) $(RM_ON_START) wrongtermsize
-	$(RUN_VIM) $*.in
-	@/bin/sh -c "if test -e wrongtermsize; then                                 \
-	                 echo;                                                      \
-	                 echo test1 FAILED - terminal size must be 80x24 or larger; \
-	                 echo; exit 1;                                              \
-	             elif diff test.out $*.ok; then                                 \
-	                 mv -f test.out $*.out;                                     \
-	             else                                                           \
-	                 echo;                                                      \
-	                 echo test1 FAILED - Something basic is wrong;              \
-	                 echo;                                                      \
-	                 exit 1;                                                    \
-	             fi"
-	-rm -rf X* viminfo
+	@echo "[OLDTEST-PREP] Running test1"
+	@rm -rf $*.failed $(RM_ON_RUN) $(RM_ON_START) wrongtermsize
+	@mkdir -p $(TMPDIR)
+	@/bin/sh runnvim.sh $(ROOT) $(NVIM_PRG) $* $(RUN_VIM) $*.in
+	@rm -f wrongtermsize
+	@rm -rf X* viminfo
 
 %.out: %.in .gdbinit
-	-rm -rf $*.failed test.ok $(RM_ON_RUN)
-	cp $*.ok test.ok
-	# Sleep a moment to avoid that the xterm title is messed up.
-	# 200 msec is sufficient, but only modern sleep supports a fraction of
-	# a second, fall back to a second if it fails.
-	@-/bin/sh -c "sleep .2 > /dev/null 2>&1 || sleep 1"
-	$(RUN_VIM) $*.in
+	@echo "[OLDESTTEST] Running" $*
+	@rm -rf $*.failed test.ok $(RM_ON_RUN)
+	@mkdir -p $(TMPDIR)
+	@cp $*.ok test.ok
+	@/bin/sh runnvim.sh --oldesttest $(ROOT) $(NVIM_PRG) $* $(RUN_VIM) $*.in
+	@rm -rf X* test.ok viminfo
 
-	# Check if the test.out file matches test.ok.
-	@/bin/sh -c "if test -f test.out; then                \
-	                 if diff -u test.out $*.ok; then         \
-	                     mv -f test.out $*.out;           \
-	                 else                                 \
-	                     echo $* FAILED >> test.log;      \
-	                     mv -f test.out $*.failed;        \
-	                 fi;                                  \
-	             else                                     \
-	                 echo $* NO OUTPUT >>test.log;        \
-	             fi"
-	@/bin/sh -c "if test -f valgrind; then                \
-	                 mv -f valgrind valgrind.$*;          \
-	             fi"
-	-rm -rf X* test.ok viminfo
-
+# Explicit dependencies.
 test49.out: test49.vim
 
 nolog:
-	-rm -f test.log messages
+	@echo "[OLDTEST-PREP] Removing test.log and messages"
+	@rm -f test.log messages
 
 
 # New style of tests uses Vim script with assert calls.  These are easier
 # to write and a lot easier to read and debug.
 # Limitation: Only works with the +eval feature.
-RUN_VIMTEST = VIMRUNTIME=$(SCRIPTSOURCE); export VIMRUNTIME; $(VALGRIND) $(VIMPROG) -u unix.vim -U NONE --noplugin
+RUN_VIMTEST = $(TOOL) $(NVIM_PRG) -u unix.vim -U NONE -i viminfo --headless --noplugin
 
 newtests: newtestssilent
 	@/bin/sh -c "if test -f messages && grep -q 'FAILED' messages; then \
@@ -182,4 +163,6 @@ newtests: newtestssilent
 newtestssilent: $(NEW_TESTS)
 
 %.res: %.vim .gdbinit
-	$(RUN_VIMTEST) -u NONE -S runtest.vim $*.vim
+	@echo "[OLDTEST] Running" $*
+	@mkdir -p $(TMPDIR)
+	@/bin/sh runnvim.sh $(ROOT) $(NVIM_PRG) $* $(RUN_VIMTEST) -u NONE -S runtest.vim $*.vim

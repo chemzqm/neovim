@@ -1,12 +1,17 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
 
 #include "nvim/ascii.h"
+#include "nvim/assert.h"
 #include "nvim/indent.h"
 #include "nvim/eval.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
+#include "nvim/mark.h"
 #include "nvim/memline.h"
 #include "nvim/memory.h"
 #include "nvim/misc1.h"
@@ -17,6 +22,7 @@
 #include "nvim/search.h"
 #include "nvim/strings.h"
 #include "nvim/undo.h"
+#include "nvim/buffer.h"
 
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
@@ -55,7 +61,8 @@ int get_indent_str(char_u *ptr, int ts, int list)
   for (; *ptr; ++ptr) {
     // Count a tab for what it is worth.
     if (*ptr == TAB) {
-      if (!list || lcs_tab1) {  // count a tab for what it is worth
+      if (!list || curwin->w_p_lcs_chars.tab1) {
+        // count a tab for what it is worth
         count += ts - (count % ts);
       } else {
         // In list mode, when tab is not set, count screen char width
@@ -198,8 +205,12 @@ int set_indent(int size, int flags)
   // characters and allocate accordingly.  We will fill the rest with spaces
   // after the if (!curbuf->b_p_et) below.
   if (orig_char_len != -1) {
-    assert(orig_char_len + size - ind_done + line_len >= 0);
-    newline = xmalloc((size_t)(orig_char_len + size - ind_done + line_len));
+    int newline_size;  // = orig_char_len + size - ind_done + line_len
+    STRICT_ADD(orig_char_len, size, &newline_size, int);
+    STRICT_SUB(newline_size, ind_done, &newline_size, int);
+    STRICT_ADD(newline_size, line_len, &newline_size, int);
+    assert(newline_size >= 0);
+    newline = xmalloc((size_t)newline_size);
     todo = size - ind_done;
 
     // Set total length of indent in characters, which may have been
@@ -221,7 +232,9 @@ int set_indent(int size, int flags)
   } else {
     todo = size;
     assert(ind_len + line_len >= 0);
-    newline = xmalloc((size_t)(ind_len + line_len));
+    size_t newline_size;
+    STRICT_ADD(ind_len, line_len, &newline_size, size_t);
+    newline = xmalloc(newline_size);
     s = newline;
   }
 
@@ -387,7 +400,9 @@ int copy_indent(int size, char_u *src)
       // and the rest of the line.
       line_len = (int)STRLEN(get_cursor_line_ptr()) + 1;
       assert(ind_len + line_len >= 0);
-      line = xmalloc((size_t)(ind_len + line_len));
+      size_t line_size;
+      STRICT_ADD(ind_len, line_len, &line_size, size_t);
+      line = xmalloc(line_size);
       p = line;
     }
   }
@@ -450,26 +465,27 @@ int get_number_indent(linenr_T lnum)
  * parameters into account. Window must be specified, since it is not
  * necessarily always the current one.
  */
-int get_breakindent_win(win_T *wp, char_u *line) {
-  static int prev_indent = 0;  /* cached indent value */
-  static long prev_ts = 0; /* cached tabstop value */
-  static char_u *prev_line = NULL; /* cached pointer to line */
-  static int prev_tick = 0;  // changedtick of cached value
+int get_breakindent_win(win_T *wp, char_u *line)
+  FUNC_ATTR_NONNULL_ARG(1)
+{
+  static int prev_indent = 0;  // Cached indent value.
+  static long prev_ts = 0;  // Cached tabstop value.
+  static char_u *prev_line = NULL;  // cached pointer to line.
+  static varnumber_T prev_tick = 0;  // Changedtick of cached value.
   int bri = 0;
-  /* window width minus window margin space, i.e. what rests for text */
-  const int eff_wwidth = wp->w_width
+  // window width minus window margin space, i.e. what rests for text
+  const int eff_wwidth = wp->w_width_inner
     - ((wp->w_p_nu || wp->w_p_rnu)
         && (vim_strchr(p_cpo, CPO_NUMCOL) == NULL)
         ? number_width(wp) + 1 : 0);
 
   /* used cached indent, unless pointer or 'tabstop' changed */
   if (prev_line != line || prev_ts != wp->w_buffer->b_p_ts
-      || prev_tick != wp->w_buffer->b_changedtick) {
+      || prev_tick != buf_get_changedtick(wp->w_buffer)) {
     prev_line = line;
     prev_ts = wp->w_buffer->b_p_ts;
-    prev_tick = wp->w_buffer->b_changedtick;
-    prev_indent = get_indent_str(line,
-            (int)wp->w_buffer->b_p_ts, wp->w_p_list);
+    prev_tick = buf_get_changedtick(wp->w_buffer);
+    prev_indent = get_indent_str(line, (int)wp->w_buffer->b_p_ts, wp->w_p_list);
   }
   bri = prev_indent + wp->w_p_brishift;
 
@@ -516,7 +532,7 @@ int inindent(int extra)
 // Get indent level from 'indentexpr'.
 int get_expr_indent(void)
 {
-  int indent;
+  int indent = -1;
   pos_T save_pos;
   colnr_T save_curswant;
   int save_set_curswant;
@@ -534,7 +550,12 @@ int get_expr_indent(void)
     sandbox++;
   }
   textlock++;
-  indent = eval_to_number(curbuf->b_p_inde);
+
+  // Need to make a copy, the 'indentexpr' option could be changed while
+  // evaluating it.
+  char_u *inde_copy = vim_strsave(curbuf->b_p_inde);
+  indent = (int)eval_to_number(inde_copy);
+  xfree(inde_copy);
 
   if (use_sandbox) {
     sandbox--;
@@ -598,7 +619,7 @@ int get_lisp_indent(void)
     paren = *pos;
     pos = findmatch(NULL, '[');
 
-    if ((pos == NULL) || ltp(pos, &paren)) {
+    if ((pos == NULL) || lt(*pos, paren)) {
       pos = &paren;
     }
   }

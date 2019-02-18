@@ -2,7 +2,7 @@
 " Language:        dircolors(1) input file
 " Maintainer:      Jan Larres <jan@majutsushi.net>
 " Previous Maintainer: Nikolai Weibull <now@bitwi.se>
-" Latest Revision: 2013-08-17
+" Latest Revision: 2018-02-19
 
 if exists("b:current_syntax")
     finish
@@ -32,7 +32,7 @@ syntax match dircolorsEscape '\\[abefnrtv?_\\^#]'
 syntax match dircolorsEscape '\\[0-9]\{3}'
 syntax match dircolorsEscape '\\x[0-9a-f]\{3}'
 
-if !has('gui_running') && &t_Co == ''
+if !(has('gui_running') || &termguicolors) && &t_Co == ''
     syntax match dircolorsNumber '\<\d\+\>'
     highlight default link dircolorsNumber Number
 endif
@@ -84,7 +84,7 @@ endfunction
 
 function! s:get_hi_str(color, place) abort
     if a:color >= 0 && a:color <= 255
-        if has('gui_running')
+        if has('gui_running') || &termguicolors
             return ' gui' . a:place . '=' . s:termguicolors[a:color]
         elseif a:color <= 7 || &t_Co == 256 || &t_Co == 88
             return ' cterm' . a:place . '=' . a:color
@@ -135,6 +135,12 @@ function! s:preview_color(linenr) abort
         elseif item >= 40 && item <= 47
             " ANSI SGR background color
             let hi_str .= s:get_hi_str(item - 40, 'bg')
+        elseif item >= 90 && item <= 97
+            " ANSI SGR+8 foreground color (xterm 16-color support)
+            let hi_str .= s:get_hi_str(item - 82, 'fg')
+        elseif item >= 100 && item <= 107
+            " ANSI SGR+8 background color (xterm 16-color support)
+            let hi_str .= s:get_hi_str(item - 92, 'bg')
         elseif item == 38
             " Foreground for terminals with 88/256 color support
             let color = s:get_256color(colors)
@@ -169,7 +175,7 @@ function! s:preview_color(linenr) abort
               \ ' "\_s\zs' . colordef . '\ze\_s"'
         let hi_attrs_str = ''
         if !empty(hi_attrs)
-            if has('gui_running')
+            if has('gui_running') || &termguicolors
                 let hi_attrs_str = ' gui=' . join(hi_attrs, ',')
             else
                 let hi_attrs_str = ' cterm=' . join(hi_attrs, ',')
@@ -199,11 +205,11 @@ endfunction
 
 let b:dc_next_index = 0
 
-if has('gui_running')
+if has('gui_running') || &termguicolors
     call s:set_guicolors()
 endif
 
-if has('gui_running') || &t_Co != ''
+if has('gui_running') || &termguicolors || &t_Co != ''
     call s:reset_colors()
 
     autocmd CursorMoved,CursorMovedI <buffer> call s:preview_color('.')

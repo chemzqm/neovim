@@ -2,9 +2,11 @@ local helpers = require('test.functional.helpers')(after_each)
 local Screen = require('test.functional.ui.screen')
 local clear, feed = helpers.clear, helpers.feed
 local eval, eq, neq = helpers.eval, helpers.eq, helpers.neq
-local execute, source, expect = helpers.execute, helpers.source, helpers.expect
-
-if helpers.pending_win32(pending) then return end
+local feed_command, source, expect = helpers.feed_command, helpers.source, helpers.expect
+local curbufmeths = helpers.curbufmeths
+local command = helpers.command
+local meths = helpers.meths
+local wait = helpers.wait
 
 describe('completion', function()
   local screen
@@ -60,38 +62,44 @@ describe('completion', function()
     it('returns expected dict in normal completion', function()
       feed('ifoo<ESC>o<C-x><C-n>')
       eq('foo', eval('getline(2)'))
-      eq({word = 'foo', abbr = '', menu = '', info = '', kind = ''},
+      eq({word = 'foo', abbr = '', menu = '',
+          info = '', kind = '', user_data = ''},
         eval('v:completed_item'))
     end)
     it('is readonly', function()
       screen:try_resize(80, 8)
       feed('ifoo<ESC>o<C-x><C-n><ESC>')
-      execute('let v:completed_item.word = "bar"')
+      feed_command('let v:completed_item.word = "bar"')
       neq(nil, string.find(eval('v:errmsg'), '^E46: '))
-      execute('let v:errmsg = ""')
+      feed_command('let v:errmsg = ""')
 
-      execute('let v:completed_item.abbr = "bar"')
+      feed_command('let v:completed_item.abbr = "bar"')
       neq(nil, string.find(eval('v:errmsg'), '^E46: '))
-      execute('let v:errmsg = ""')
+      feed_command('let v:errmsg = ""')
 
-      execute('let v:completed_item.menu = "bar"')
+      feed_command('let v:completed_item.menu = "bar"')
       neq(nil, string.find(eval('v:errmsg'), '^E46: '))
-      execute('let v:errmsg = ""')
+      feed_command('let v:errmsg = ""')
 
-      execute('let v:completed_item.info = "bar"')
+      feed_command('let v:completed_item.info = "bar"')
       neq(nil, string.find(eval('v:errmsg'), '^E46: '))
-      execute('let v:errmsg = ""')
+      feed_command('let v:errmsg = ""')
 
-      execute('let v:completed_item.kind = "bar"')
+      feed_command('let v:completed_item.kind = "bar"')
       neq(nil, string.find(eval('v:errmsg'), '^E46: '))
-      execute('let v:errmsg = ""')
+      feed_command('let v:errmsg = ""')
+
+      feed_command('let v:completed_item.user_data = "bar"')
+      neq(nil, string.find(eval('v:errmsg'), '^E46: '))
+      feed_command('let v:errmsg = ""')
     end)
     it('returns expected dict in omni completion', function()
       source([[
       function! TestOmni(findstart, base) abort
         return a:findstart ? 0 : [{'word': 'foo', 'abbr': 'bar',
         \ 'menu': 'baz', 'info': 'foobar', 'kind': 'foobaz'},
-        \ {'word': 'word', 'abbr': 'abbr', 'menu': 'menu', 'info': 'info', 'kind': 'kind'}]
+        \ {'word': 'word', 'abbr': 'abbr', 'menu': 'menu',
+        \  'info': 'info', 'kind': 'kind'}]
       endfunction
       setlocal omnifunc=TestOmni
       ]])
@@ -108,7 +116,7 @@ describe('completion', function()
         {3:-- Omni completion (^O^N^P) }{4:match 1 of 2}                    |
       ]])
       eq({word = 'foo', abbr = 'bar', menu = 'baz',
-          info = 'foobar', kind = 'foobaz'},
+          info = 'foobar', kind = 'foobaz', user_data = ''},
         eval('v:completed_item'))
     end)
   end)
@@ -124,7 +132,7 @@ describe('completion', function()
     end)
 
     it('inserts the first candidate if default', function()
-      execute('set completeopt+=menuone')
+      feed_command('set completeopt+=menuone')
       feed('ifoo<ESC>o')
       screen:expect([[
         foo                                                         |
@@ -175,7 +183,7 @@ describe('completion', function()
       eq('foo', eval('getline(3)'))
     end)
     it('selects the first candidate if noinsert', function()
-      execute('set completeopt+=menuone,noinsert')
+      feed_command('set completeopt+=menuone,noinsert')
       feed('ifoo<ESC>o<C-x><C-n>')
       screen:expect([[
         foo                                                         |
@@ -215,7 +223,7 @@ describe('completion', function()
       eq('foo', eval('getline(3)'))
     end)
     it('does not insert the first candidate if noselect', function()
-      execute('set completeopt+=menuone,noselect')
+      feed_command('set completeopt+=menuone,noselect')
       feed('ifoo<ESC>o<C-x><C-n>')
       screen:expect([[
         foo                                                         |
@@ -255,7 +263,7 @@ describe('completion', function()
       eq('bar', eval('getline(3)'))
     end)
     it('does not select/insert the first candidate if noselect and noinsert', function()
-      execute('set completeopt+=menuone,noselect,noinsert')
+      feed_command('set completeopt+=menuone,noselect,noinsert')
       feed('ifoo<ESC>o<C-x><C-n>')
       screen:expect([[
         foo                                                         |
@@ -304,14 +312,14 @@ describe('completion', function()
       eq('', eval('getline(3)'))
     end)
     it('does not change modified state if noinsert', function()
-      execute('set completeopt+=menuone,noinsert')
-      execute('setlocal nomodified')
+      feed_command('set completeopt+=menuone,noinsert')
+      feed_command('setlocal nomodified')
       feed('i<C-r>=TestComplete()<CR><ESC>')
       eq(0, eval('&l:modified'))
     end)
     it('does not change modified state if noselect', function()
-      execute('set completeopt+=menuone,noselect')
-      execute('setlocal nomodified')
+      feed_command('set completeopt+=menuone,noselect')
+      feed_command('setlocal nomodified')
       feed('i<C-r>=TestComplete()<CR><ESC>')
       eq(0, eval('&l:modified'))
     end)
@@ -325,8 +333,8 @@ describe('completion', function()
         return ''
       endfunction
       ]])
-      execute('set completeopt+=noselect,noinsert')
-      execute('inoremap <right> <c-r>=TestComplete()<cr>')
+      feed_command('set completeopt+=noselect,noinsert')
+      feed_command('inoremap <right> <c-r>=TestComplete()<cr>')
     end)
 
     local tests = {
@@ -540,7 +548,7 @@ describe('completion', function()
         return ''
       endfunction
       ]])
-      execute("set completeopt=menuone,noselect")
+      feed_command("set completeopt=menuone,noselect")
     end)
 
     it("works", function()
@@ -706,7 +714,7 @@ describe('completion', function()
 
 
   it('disables folding during completion', function ()
-    execute("set foldmethod=indent")
+    feed_command("set foldmethod=indent")
     feed('i<Tab>foo<CR><Tab>bar<Esc>gg')
     screen:expect([[
               ^foo                                                 |
@@ -733,7 +741,7 @@ describe('completion', function()
   end)
 
   it('popupmenu is not interrupted by events', function ()
-    execute("set complete=.")
+    feed_command("set complete=.")
 
     feed('ifoobar fooegg<cr>f<c-p>')
     screen:expect([[
@@ -749,7 +757,7 @@ describe('completion', function()
 
     eval('1 + 1')
     -- popupmenu still visible
-    screen:expect([[
+    screen:expect{grid=[[
       foobar fooegg                                               |
       fooegg^                                                      |
       {1:foobar         }{0:                                             }|
@@ -758,7 +766,7 @@ describe('completion', function()
       {0:~                                                           }|
       {0:~                                                           }|
       {3:-- Keyword completion (^N^P) }{4:match 1 of 2}                   |
-    ]])
+    ]], unchanged=true}
 
     feed('<c-p>')
     -- Didn't restart completion: old matches still used
@@ -814,105 +822,186 @@ describe('completion', function()
     end)
   end)
 
-end)
+  describe('with numeric items', function()
+    before_each(function()
+      source([[
+        function! TestComplete() abort
+          call complete(1, g:_complist)
+          return ''
+        endfunction
+      ]])
+      meths.set_option('completeopt', 'menuone,noselect')
+      meths.set_var('_complist', {{
+        word=0,
+        abbr=1,
+        menu=2,
+        kind=3,
+        info=4,
+        icase=5,
+        dup=6,
+        empty=7,
+      }})
+    end)
 
-describe('External completion popupmenu', function()
-  local screen
-  local items, selected, anchor
-  before_each(function()
-    clear()
-    screen = Screen.new(60, 8)
-    screen:attach({rgb=true, popupmenu_external=true})
-    screen:set_default_attr_ids({
-      [1] = {bold=true, foreground=Screen.colors.Blue},
-      [2] = {bold = true},
-    })
-    screen:set_on_event_handler(function(name, data)
-      if name == "popupmenu_show" then
-        local row, col
-        items, selected, row, col = unpack(data)
-        anchor = {row, col}
-      elseif name == "popupmenu_select" then
-        selected = data[1]
-      elseif name == "popupmenu_hide" then
-        items = nil
-      end
+    it('shows correct variant as word', function()
+      feed('i<C-r>=TestComplete()<CR>')
+      screen:expect([[
+        ^                                                            |
+        {1:1 3 2          }{0:                                             }|
+        {0:~                                                           }|
+        {0:~                                                           }|
+        {0:~                                                           }|
+        {0:~                                                           }|
+        {0:~                                                           }|
+        {3:-- INSERT --}                                                |
+      ]])
     end)
   end)
 
-  it('works', function()
-    source([[
-      function! TestComplete() abort
-        call complete(1, ['foo', 'bar', 'spam'])
-        return ''
-      endfunction
+  it("'ignorecase' 'infercase' CTRL-X CTRL-N #6451", function()
+    feed_command('set ignorecase infercase')
+    feed_command('edit BACKERS.md')
+    feed('oX<C-X><C-N>')
+    screen:expect([[
+      # Bountysource Backers                                      |
+      Xnull^                                                       |
+      {2:Xnull          }{6: }                                            |
+      {1:Xoxomoon       }{6: }ryone who backed our [Bountysource fundraise|
+      {1:Xu             }{6: }ountysource.com/teams/neovim/fundraiser)!   |
+      {1:Xpayn          }{2: }                                            |
+      {1:Xinity         }{2: }d URL in BACKERS.md.                        |
+      {3:-- Keyword Local completion (^N^P) }{4:match 1 of 7}             |
     ]])
-    local expected = {
-      {'foo', '', '', ''},
-      {'bar', '', '', ''},
-      {'spam', '', '', ''},
-    }
-    feed('o<C-r>=TestComplete()<CR>')
-    screen:expect([[
-                                                                  |
-      foo^                                                         |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(0, selected)
-      eq({1,0}, anchor)
-    end)
+  end)
 
-    feed('<c-p>')
-    screen:expect([[
-                                                                  |
-      ^                                                            |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(-1, selected)
-      eq({1,0}, anchor)
-    end)
+  it('TextChangedP autocommand', function()
+    curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar'})
+    source([[
+      set complete=. completeopt=menuone
+      let g:foo = []
+      autocmd! TextChanged * :call add(g:foo, "N")
+      autocmd! TextChangedI * :call add(g:foo, "I")
+      autocmd! TextChangedP * :call add(g:foo, "P")
+      call cursor(3, 1)
+    ]])
 
-    -- down moves the selection in the menu, but does not insert anything
-    feed('<down><down>')
-    screen:expect([[
-                                                                  |
-      ^                                                            |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(1, selected)
-      eq({1,0}, anchor)
-    end)
+    command('let g:foo = []')
+    feed('o')
+    wait()
+    feed('<esc>')
+    eq({'I'}, eval('g:foo'))
 
-    feed('<cr>')
-    screen:expect([[
-                                                                  |
-      bar^                                                         |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(nil, items) -- popupmenu was hidden
-    end)
+    command('let g:foo = []')
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    eq({'I', 'I'}, eval('g:foo'))
+    feed('<esc>')
+
+    command('let g:foo = []')
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    eq({'I', 'I', 'P'}, eval('g:foo'))
+    feed('<esc>')
+
+    command('let g:foo = []')
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    wait()
+    eq({'I', 'I', 'P', 'P'}, eval('g:foo'))
+    feed('<esc>')
+
+    command('let g:foo = []')
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    wait()
+    eq({'I', 'I', 'P', 'P', 'P'}, eval('g:foo'))
+    feed('<esc>')
+
+    command('let g:foo = []')
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    wait()
+    feed('<C-N>')
+    eq({'I', 'I', 'P', 'P', 'P', 'P'}, eval('g:foo'))
+    feed('<esc>')
+
+    eq({'foo', 'bar', 'foobar', 'foo'}, eval('getline(1, "$")'))
+
+    source([[
+      au! TextChanged
+      au! TextChangedI
+      au! TextChangedP
+      set complete&vim completeopt&vim
+    ]])
+  end)
+
+  it('CompleteChanged autocommand', function()
+    curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar', ''})
+    source([[
+      set complete=. completeopt=noinsert,noselect,menuone
+      function! OnCompleteChanged()
+        let g:item = get(v:event, 'completeitem', v:null)
+        let g:bounding = get(v:event, 'pumbounding', v:null)
+      endfunction
+      autocmd! CompleteChanged * :call OnCompleteChanged()
+      call cursor(4, 1)
+    ]])
+
+    feed('S')
+    wait()
+    feed('f')
+    wait()
+    feed('<C-N>')
+    wait()
+    eq({}, eval('g:item'))
+    eq({row = 4, col = 0, width = 15,
+        height = 2, scrollbar = 0},
+      eval('g:bounding'))
+    feed('<C-N>')
+    wait()
+    eq('foo', eval('g:item["word"]'))
+    feed('<C-N>')
+    wait()
+    eq('foobar', eval('g:item["word"]'))
+    feed('<up>')
+    wait()
+    eq('foo', eval('g:item["word"]'))
+    feed('<down>')
+    wait()
+    eq('foobar', eval('g:item["word"]'))
+    feed('<esc>')
+
+    source([[
+      unlet g:item
+      unlet g:bounding
+      delfunction OnCompleteChanged
+      au! CompleteChanged
+      set complete&vim completeopt&vim
+    ]])
   end)
 end)

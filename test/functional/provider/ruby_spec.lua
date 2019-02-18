@@ -1,25 +1,29 @@
 local helpers = require('test.functional.helpers')(after_each)
 
-local eq = helpers.eq
-local feed = helpers.feed
 local clear = helpers.clear
-local funcs = helpers.funcs
-local meths = helpers.meths
-local insert = helpers.insert
-local expect = helpers.expect
 local command = helpers.command
-local write_file = helpers.write_file
 local curbufmeths = helpers.curbufmeths
+local eq = helpers.eq
+local eval = helpers.eval
+local expect = helpers.expect
+local expect_err = helpers.expect_err
+local feed = helpers.feed
+local feed_command = helpers.feed_command
+local funcs = helpers.funcs
+local insert = helpers.insert
+local meths = helpers.meths
+local missing_provider = helpers.missing_provider
+local write_file = helpers.write_file
 
 do
   clear()
-  command('let g:prog = provider#ruby#Detect()')
-  local prog = meths.get_var('prog')
-
-  if prog == '' then
-    pending(
-      "Cannot find the neovim RubyGem. Try :CheckHealth",
-      function() end)
+  if missing_provider('ruby') then
+    it(':ruby reports E319 if provider is missing', function()
+      local expected = [[Vim%(ruby.*%):E319: No "ruby" provider found.*]]
+      expect_err(expected, command, 'ruby puts "foo"')
+      expect_err(expected, command, 'rubyfile foo')
+    end)
+    pending("Missing neovim RubyGem.", function() end)
     return
   end
 end
@@ -92,5 +96,13 @@ describe(':rubydo command', function()
   it('does not modify the buffer if no changes are made', function()
     command('normal :rubydo 42')
     eq(false, curbufmeths.get_option('modified'))
+  end)
+end)
+
+describe('ruby provider', function()
+  it('RPC call to expand("<afile>") during BufDelete #5245 #5617', function()
+    command([=[autocmd BufDelete * ruby VIM::evaluate('expand("<afile>")')]=])
+    feed_command('help help')
+    eq(2, eval('1+1'))  -- Still alive?
   end)
 end)

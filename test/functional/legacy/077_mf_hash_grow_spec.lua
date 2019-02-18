@@ -7,30 +7,37 @@
 -- If it isn't available then the test will be skipped.
 
 local helpers = require('test.functional.helpers')(after_each)
+
 local feed = helpers.feed
-local clear, execute, expect = helpers.clear, helpers.execute, helpers.expect
+local wait = helpers.wait
+local clear = helpers.clear
+local expect = helpers.expect
+local command = helpers.command
 
 describe('mf_hash_grow()', function()
   setup(clear)
 
   -- Check to see if cksum exists, otherwise skip the test
-  if os.execute('which cksum 2>&1 > /dev/null') ~= 0 then
+  local null = helpers.iswin() and 'nul' or '/dev/null'
+  if os.execute('cksum --help >' .. null .. ' 2>&1') ~= 0 then
     pending('was not tested because cksum was not found', function() end)
   else
     it('is working', function()
-      execute('set fileformat=unix undolevels=-1')
+      command('set fileformat=unix undolevels=-1')
 
       -- Fill the buffer with numbers 1 - 2000000
-      execute('let i = 1')
-      execute('while i <= 2000000 | call append(i, range(i, i + 99)) | let i += 100 | endwhile')
+      command('let i = 1')
+      command('while i <= 2000000 | call append(i, range(i, i + 99)) | let i += 100 | endwhile')
 
       -- Delete empty first line, save to Xtest, and clear buffer
       feed('ggdd<cr>')
-      execute('w! Xtest')
+      wait()
+      command('w! Xtest')
       feed('ggdG<cr>')
+      wait()
 
       -- Calculate the cksum of Xtest and delete first line
-      execute('r !cksum Xtest')
+      command('r !cksum Xtest')
       feed('ggdd<cr>')
 
       -- Assert correct output of cksum.

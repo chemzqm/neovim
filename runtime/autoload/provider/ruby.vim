@@ -4,49 +4,26 @@ if exists('g:loaded_ruby_provider')
 endif
 let g:loaded_ruby_provider = 1
 
-let s:stderr = {}
-let s:job_opts = {'rpc': v:true}
-
-function! s:job_opts.on_stderr(chan_id, data, event)
-  let stderr = get(s:stderr, a:chan_id, [''])
-  let last = remove(stderr, -1)
-  let a:data[0] = last.a:data[0]
-  call extend(stderr, a:data)
-  let s:stderr[a:chan_id] = stderr
-endfunction
-
 function! provider#ruby#Detect() abort
-  return exepath('neovim-ruby-host')
+  return s:prog
 endfunction
 
-function! provider#ruby#Prog()
+function! provider#ruby#Prog() abort
   return s:prog
 endfunction
 
 function! provider#ruby#Require(host) abort
-  let args = [provider#ruby#Prog()]
+  let prog = provider#ruby#Prog()
   let ruby_plugins = remote#host#PluginsForHost(a:host.name)
 
   for plugin in ruby_plugins
-    call add(args, plugin.path)
+    let prog .= " " . shellescape(plugin.path)
   endfor
 
-  try
-    let channel_id = jobstart(args, s:job_opts)
-    if rpcrequest(channel_id, 'poll') ==# 'ok'
-      return channel_id
-    endif
-  catch
-    echomsg v:throwpoint
-    echomsg v:exception
-    for row in get(s:stderr, channel_id, [])
-      echomsg row
-    endfor
-  endtry
-  throw remote#host#LoadErrorForHost(a:host.orig_name, '$NVIM_RUBY_LOG_FILE')
+  return provider#Poll(prog, a:host.orig_name, '$NVIM_RUBY_LOG_FILE')
 endfunction
 
-function! provider#ruby#Call(method, args)
+function! provider#ruby#Call(method, args) abort
   if s:err != ''
     echoerr s:err
     return
@@ -66,12 +43,28 @@ function! provider#ruby#Call(method, args)
   return call('rpcrequest', insert(insert(a:args, 'ruby_'.a:method), s:host))
 endfunction
 
+function! s:detect()
+  if exists("g:ruby_host_prog")
+    return expand(g:ruby_host_prog)
+  elseif has('win32')
+    return exepath('neovim-ruby-host.bat')
+  else
+    let p = exepath('neovim-ruby-host')
+    if empty(p)
+      return ''
+    endif
+    " neovim-ruby-host could be an rbenv shim for another Ruby version.
+    call system(p)
+    return v:shell_error ? '' : p
+  end
+endfunction
+
 let s:err = ''
-let s:prog = provider#ruby#Detect()
+let s:prog = s:detect()
 let s:plugin_path = expand('<sfile>:p:h') . '/script_host.rb'
 
 if empty(s:prog)
-  let s:err = 'Cannot find the neovim RubyGem. Try :CheckHealth'
+  let s:err = 'Cannot find the neovim RubyGem. Try :checkhealth'
 endif
 
 call remote#host#RegisterClone('legacy-ruby-provider', 'ruby')

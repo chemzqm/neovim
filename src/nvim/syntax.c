@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 /*
  * syntax.c: code for syntax highlighting
  */
@@ -13,12 +16,14 @@
 #include "nvim/ascii.h"
 #include "nvim/syntax.h"
 #include "nvim/charset.h"
+#include "nvim/cursor_shape.h"
 #include "nvim/eval.h"
 #include "nvim/ex_cmds2.h"
 #include "nvim/ex_docmd.h"
 #include "nvim/fileio.h"
 #include "nvim/fold.h"
 #include "nvim/hashtab.h"
+#include "nvim/highlight.h"
 #include "nvim/indent_c.h"
 #include "nvim/mbyte.h"
 #include "nvim/memline.h"
@@ -39,42 +44,52 @@
 #include "nvim/ui.h"
 #include "nvim/os/os.h"
 #include "nvim/os/time.h"
+#include "nvim/buffer.h"
 
 static bool did_syntax_onoff = false;
 
-// Structure that stores information about a highlight group.
-// The ID of a highlight group is also called group ID.  It is the index in
-// the highlight_ga array PLUS ONE.
+/// Structure that stores information about a highlight group.
+/// The ID of a highlight group is also called group ID.  It is the index in
+/// the highlight_ga array PLUS ONE.
 struct hl_group {
-  char_u      *sg_name;         // highlight group name
-  char_u      *sg_name_u;       // uppercase of sg_name
-  int sg_attr;                  // Screen attr
-  int sg_link;                  // link to this highlight group ID
-  int sg_set;                   // combination of SG_* flags
-  scid_T sg_scriptID;           // script in which the group was last set
+  char_u      *sg_name;         ///< highlight group name
+  char_u      *sg_name_u;       ///< uppercase of sg_name
+  bool sg_cleared;              ///< "hi clear" was used
+  int sg_attr;                  ///< Screen attr @see ATTR_ENTRY
+  int sg_link;                  ///< link to this highlight group ID
+  int sg_set;                   ///< combination of flags in \ref SG_SET
+  scid_T sg_scriptID;           ///< script in which the group was last set
   // for terminal UIs
-  int sg_cterm;                 // "cterm=" highlighting attr
-  int sg_cterm_fg;              // terminal fg color number + 1
-  int sg_cterm_bg;              // terminal bg color number + 1
-  int sg_cterm_bold;            // bold attr was set for light color
+  int sg_cterm;                 ///< "cterm=" highlighting attr
+                                ///< (combination of \ref HlAttrFlags)
+  int sg_cterm_fg;              ///< terminal fg color number + 1
+  int sg_cterm_bg;              ///< terminal bg color number + 1
+  bool sg_cterm_bold;           ///< bold attr was set for light color
   // for RGB UIs
-  int sg_gui;                   // "gui=" highlighting attributes
-  RgbValue sg_rgb_fg;           // RGB foreground color
-  RgbValue sg_rgb_bg;           // RGB background color
-  RgbValue sg_rgb_sp;           // RGB special color
-  uint8_t *sg_rgb_fg_name;      // RGB foreground color name
-  uint8_t *sg_rgb_bg_name;      // RGB background color name
-  uint8_t *sg_rgb_sp_name;      // RGB special color name
+  int sg_gui;                   ///< "gui=" highlighting attributes
+                                ///< (combination of \ref HlAttrFlags)
+  RgbValue sg_rgb_fg;           ///< RGB foreground color
+  RgbValue sg_rgb_bg;           ///< RGB background color
+  RgbValue sg_rgb_sp;           ///< RGB special color
+  uint8_t *sg_rgb_fg_name;      ///< RGB foreground color name
+  uint8_t *sg_rgb_bg_name;      ///< RGB background color name
+  uint8_t *sg_rgb_sp_name;      ///< RGB special color name
 };
 
+/// \addtogroup SG_SET
+/// @{
 #define SG_CTERM        2       // cterm has been set
 #define SG_GUI          4       // gui has been set
 #define SG_LINK         8       // link has been set
+/// @}
 
-// highlight groups for 'highlight' option
+// builtin |highlight-groups|
 static garray_T highlight_ga = GA_EMPTY_INIT_VALUE;
 
-#define HL_TABLE() ((struct hl_group *)((highlight_ga.ga_data)))
+static inline struct hl_group * HL_TABLE(void)
+{
+  return ((struct hl_group *)((highlight_ga.ga_data)));
+}
 
 #define MAX_HL_ID       20000   /* maximum value for a highlight ID. */
 
@@ -93,10 +108,8 @@ static int include_none = 0;    /* when 1 include "nvim/None" */
 static int include_default = 0; /* when 1 include "nvim/default" */
 static int include_link = 0;    /* when 2 include "nvim/link" and "clear" */
 
-/*
- * The "term", "cterm" and "gui" arguments can be any combination of the
- * following names, separated by commas (but no spaces!).
- */
+/// The "term", "cterm" and "gui" arguments can be any combination of the
+/// following names, separated by commas (but no spaces!).
 static char *(hl_name_table[]) =
 {"bold", "standout", "underline", "undercurl",
  "italic", "reverse", "inverse", "NONE"};
@@ -104,42 +117,42 @@ static int hl_attr_table[] =
 {HL_BOLD, HL_STANDOUT, HL_UNDERLINE, HL_UNDERCURL, HL_ITALIC, HL_INVERSE,
  HL_INVERSE, 0};
 
-/*
- * The patterns that are being searched for are stored in a syn_pattern.
- * A match item consists of one pattern.
- * A start/end item consists of n start patterns and m end patterns.
- * A start/skip/end item consists of n start patterns, one skip pattern and m
- * end patterns.
- * For the latter two, the patterns are always consecutive: start-skip-end.
- *
- * A character offset can be given for the matched text (_m_start and _m_end)
- * and for the actually highlighted text (_h_start and _h_end).
- */
+// The patterns that are being searched for are stored in a syn_pattern.
+// A match item consists of one pattern.
+// A start/end item consists of n start patterns and m end patterns.
+// A start/skip/end item consists of n start patterns, one skip pattern and m
+// end patterns.
+// For the latter two, the patterns are always consecutive: start-skip-end.
+//
+// A character offset can be given for the matched text (_m_start and _m_end)
+// and for the actually highlighted text (_h_start and _h_end).
+//
+// Note that ordering of members is optimized to reduce padding.
 typedef struct syn_pattern {
-  char sp_type;                         /* see SPTYPE_ defines below */
-  char sp_syncing;                      /* this item used for syncing */
-  int sp_flags;                         /* see HL_ defines below */
-  int sp_cchar;                         /* conceal substitute character */
-  struct sp_syn sp_syn;                 /* struct passed to in_id_list() */
-  short sp_syn_match_id;                /* highlight group ID of pattern */
-  char_u      *sp_pattern;              /* regexp to match, pattern */
-  regprog_T   *sp_prog;                 /* regexp to match, program */
+  char sp_type;                         // see SPTYPE_ defines below
+  bool sp_syncing;                      // this item used for syncing
+  int16_t sp_syn_match_id;              // highlight group ID of pattern
+  int16_t sp_off_flags;                 // see below
+  int sp_offsets[SPO_COUNT];            // offsets
+  int sp_flags;                         // see HL_ defines below
+  int sp_cchar;                         // conceal substitute character
+  int sp_ic;                            // ignore-case flag for sp_prog
+  int sp_sync_idx;                      // sync item index (syncing only)
+  int sp_line_id;                       // ID of last line where tried
+  int sp_startcol;                      // next match in sp_line_id line
+  int16_t *sp_cont_list;                // cont. group IDs, if non-zero
+  int16_t *sp_next_list;                // next group IDs, if non-zero
+  struct sp_syn sp_syn;                 // struct passed to in_id_list()
+  char_u *sp_pattern;                   // regexp to match, pattern
+  regprog_T *sp_prog;                   // regexp to match, program
   syn_time_T sp_time;
-  int sp_ic;                            /* ignore-case flag for sp_prog */
-  short sp_off_flags;                   /* see below */
-  int sp_offsets[SPO_COUNT];            /* offsets */
-  short       *sp_cont_list;            /* cont. group IDs, if non-zero */
-  short       *sp_next_list;            /* next group IDs, if non-zero */
-  int sp_sync_idx;                      /* sync item index (syncing only) */
-  int sp_line_id;                       /* ID of last line where tried */
-  int sp_startcol;                      /* next match in sp_line_id line */
 } synpat_T;
 
 
 typedef struct syn_cluster_S {
-  char_u          *scl_name;        /* syntax cluster name */
-  char_u          *scl_name_u;      /* uppercase of scl_name */
-  short           *scl_list;        /* IDs in this syntax cluster */
+  char_u *scl_name;         // syntax cluster name
+  char_u *scl_name_u;       // uppercase of scl_name
+  int16_t *scl_list;        // IDs in this syntax cluster
 } syn_cluster_T;
 
 /*
@@ -148,27 +161,27 @@ typedef struct syn_cluster_S {
  * (The end positions have the column number of the next char)
  */
 typedef struct state_item {
-  int si_idx;                           /* index of syntax pattern or
-                                           KEYWORD_IDX */
-  int si_id;                            /* highlight group ID for keywords */
-  int si_trans_id;                      /* idem, transparency removed */
-  int si_m_lnum;                        /* lnum of the match */
-  int si_m_startcol;                    /* starting column of the match */
-  lpos_T si_m_endpos;                   /* just after end posn of the match */
-  lpos_T si_h_startpos;                 /* start position of the highlighting */
-  lpos_T si_h_endpos;                   /* end position of the highlighting */
-  lpos_T si_eoe_pos;                    /* end position of end pattern */
-  int si_end_idx;                       /* group ID for end pattern or zero */
-  int si_ends;                          /* if match ends before si_m_endpos */
-  int si_attr;                          /* attributes in this state */
-  long si_flags;                        /* HL_HAS_EOL flag in this state, and
-                                         * HL_SKIP* for si_next_list */
-  int si_seqnr;                         /* sequence number */
-  int si_cchar;                         /* substitution character for conceal */
-  short       *si_cont_list;            /* list of contained groups */
-  short       *si_next_list;            /* nextgroup IDs after this item ends */
-  reg_extmatch_T *si_extmatch;          /* \z(...\) matches from start
-                                         * pattern */
+  int si_idx;                           // index of syntax pattern or
+                                        // KEYWORD_IDX
+  int si_id;                            // highlight group ID for keywords
+  int si_trans_id;                      // idem, transparency removed
+  int si_m_lnum;                        // lnum of the match
+  int si_m_startcol;                    // starting column of the match
+  lpos_T si_m_endpos;                   // just after end posn of the match
+  lpos_T si_h_startpos;                 // start position of the highlighting
+  lpos_T si_h_endpos;                   // end position of the highlighting
+  lpos_T si_eoe_pos;                    // end position of end pattern
+  int si_end_idx;                       // group ID for end pattern or zero
+  int si_ends;                          // if match ends before si_m_endpos
+  int si_attr;                          // attributes in this state
+  long si_flags;                        // HL_HAS_EOL flag in this state, and
+                                        // HL_SKIP* for si_next_list
+  int si_seqnr;                         // sequence number
+  int si_cchar;                         // substitution character for conceal
+  int16_t *si_cont_list;                // list of contained groups
+  int16_t *si_next_list;                // nextgroup IDs after this item ends
+  reg_extmatch_T *si_extmatch;          // \z(...\) matches from start
+                                        // pattern
 } stateitem_T;
 
 /*
@@ -176,14 +189,14 @@ typedef struct state_item {
  * very often.
  */
 typedef struct {
-  int flags;                    /* flags for contained and transparent */
-  int keyword;                  /* TRUE for ":syn keyword" */
-  int         *sync_idx;        /* syntax item for "grouphere" argument, NULL
-                                   if not allowed */
-  char has_cont_list;           /* TRUE if "cont_list" can be used */
-  short       *cont_list;       /* group IDs for "contains" argument */
-  short       *cont_in_list;    /* group IDs for "containedin" argument */
-  short       *next_list;       /* group IDs for "nextgroup" argument */
+  int flags;                   // flags for contained and transparent
+  bool keyword;                // true for ":syn keyword"
+  int *sync_idx;               // syntax item for "grouphere" argument, NULL
+                               // if not allowed
+  bool has_cont_list;          // true if "cont_list" can be used
+  int16_t *cont_list;          // group IDs for "contains" argument
+  int16_t *cont_in_list;       // group IDs for "containedin" argument
+  int16_t *next_list;          // group IDs for "nextgroup" argument
 } syn_opt_arg_T;
 
 typedef struct {
@@ -204,12 +217,6 @@ struct name_list {
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "syntax.c.generated.h"
 #endif
-
-/*
- * An attribute number is the index in attr_table plus ATTR_OFF.
- */
-#define ATTR_OFF 1
-
 
 static char *(spo_name_tab[SPO_COUNT]) =
 {"ms=", "me=", "hs=", "he=", "rs=", "re=", "lc="};
@@ -302,6 +309,8 @@ static keyentry_T dumkey;
 #define HIKEY2KE(p)   ((keyentry_T *)((p) - (dumkey.keyword - (char_u *)&dumkey)))
 #define HI2KE(hi)      HIKEY2KE((hi)->hi_key)
 
+// -V:HI2KE:782
+
 /*
  * To reduce the time spent in keepend(), remember at which level in the state
  * stack the first item with "keepend" is present.  When "-1", there is no
@@ -311,9 +320,10 @@ static int keepend_level = -1;
 
 static char msg_no_items[] = N_("No Syntax items defined for this buffer");
 
-#define KEYWORD_IDX     -1          /* value of si_idx for keywords */
-#define ID_LIST_ALL     (short *)-1 /* valid of si_cont_list for containing all
-                                       but contained groups */
+// value of si_idx for keywords
+#define KEYWORD_IDX     -1
+// valid of si_cont_list for containing all but contained groups
+#define ID_LIST_ALL     (int16_t *)-1
 
 static int next_seqnr = 1;              /* value to use for si_seqnr */
 
@@ -356,9 +366,9 @@ static int current_state_stored = 0;      /* TRUE if stored current state
 static int current_finished = 0;        /* current line has been finished */
 static garray_T current_state           /* current stack of state_items */
   = GA_EMPTY_INIT_VALUE;
-static short    *current_next_list = NULL; /* when non-zero, nextgroup list */
-static int current_next_flags = 0;      /* flags for current_next_list */
-static int current_line_id = 0;         /* unique number for current line */
+static int16_t *current_next_list = NULL;   // when non-zero, nextgroup list
+static int current_next_flags = 0;          // flags for current_next_list
+static int current_line_id = 0;             // unique number for current line
 
 #define CUR_STATE(idx)  ((stateitem_T *)(current_state.ga_data))[idx]
 
@@ -394,12 +404,12 @@ void syntax_start(win_T *wp, linenr_T lnum)
    */
   if (syn_block != wp->w_s
       || syn_buf != wp->w_buffer
-      || changedtick != syn_buf->b_changedtick) {
+      || changedtick != buf_get_changedtick(syn_buf)) {
     invalidate_current_state();
     syn_buf = wp->w_buffer;
     syn_block = wp->w_s;
   }
-  changedtick = syn_buf->b_changedtick;
+  changedtick = buf_get_changedtick(syn_buf);
   syn_win = wp;
 
   /*
@@ -416,7 +426,7 @@ void syntax_start(win_T *wp, linenr_T lnum)
   if (VALID_STATE(&current_state)
       && current_lnum < lnum
       && current_lnum < syn_buf->b_ml.ml_line_count) {
-    (void)syn_finish_line(FALSE);
+    (void)syn_finish_line(false);
     if (!current_state_stored) {
       ++current_lnum;
       (void)store_current_state();
@@ -439,9 +449,10 @@ void syntax_start(win_T *wp, linenr_T lnum)
   if (INVALID_STATE(&current_state) && syn_block->b_sst_array != NULL) {
     /* Find last valid saved state before start_lnum. */
     for (p = syn_block->b_sst_first; p != NULL; p = p->sst_next) {
-      if (p->sst_lnum > lnum)
+      if (p->sst_lnum > lnum) {
         break;
-      if (p->sst_lnum <= lnum && p->sst_change_lnum == 0) {
+      }
+      if (p->sst_change_lnum == 0) {
         last_valid = p;
         if (p->sst_lnum >= lnum - syn_block->b_syn_sync_minlines)
           last_min_valid = p;
@@ -477,8 +488,8 @@ void syntax_start(win_T *wp, linenr_T lnum)
     dist = syn_buf->b_ml.ml_line_count / (syn_block->b_sst_len - Rows) + 1;
   while (current_lnum < lnum) {
     syn_start_line();
-    (void)syn_finish_line(FALSE);
-    ++current_lnum;
+    (void)syn_finish_line(false);
+    current_lnum++;
 
     /* If we parsed at least "minlines" lines or started at a valid
      * state, the current state is considered valid. */
@@ -575,7 +586,7 @@ static void syn_sync(win_T *wp, linenr_T start_lnum, synstate_T *last_valid)
   linenr_T lnum;
   linenr_T end_lnum;
   linenr_T break_lnum;
-  int had_sync_point;
+  bool had_sync_point;
   stateitem_T *cur_si;
   synpat_T    *spp;
   char_u      *line;
@@ -709,11 +720,9 @@ static void syn_sync(win_T *wp, linenr_T start_lnum, synstate_T *last_valid)
       for (current_lnum = lnum; current_lnum < end_lnum; ++current_lnum) {
         syn_start_line();
         for (;; ) {
-          had_sync_point = syn_finish_line(TRUE);
-          /*
-           * When a sync point has been found, remember where, and
-           * continue to look for another one, further on in the line.
-           */
+          had_sync_point = syn_finish_line(true);
+          // When a sync point has been found, remember where, and
+          // continue to look for another one, further on in the line.
           if (had_sync_point && current_state.ga_len) {
             cur_si = &CUR_STATE(current_state.ga_len - 1);
             if (cur_si->si_m_endpos.lnum > start_lnum) {
@@ -791,10 +800,11 @@ static void syn_sync(win_T *wp, linenr_T start_lnum, synstate_T *last_valid)
           }
           current_col = found_m_endpos.col;
           current_lnum = found_m_endpos.lnum;
-          (void)syn_finish_line(FALSE);
-          ++current_lnum;
-        } else
+          (void)syn_finish_line(false);
+          current_lnum++;
+        } else {
           current_lnum = start_lnum;
+        }
 
         break;
       }
@@ -869,7 +879,8 @@ static void syn_start_line(void)
   }
 
   next_match_idx = -1;
-  ++current_line_id;
+  current_line_id++;
+  next_seqnr = 1;
 }
 
 /*
@@ -1406,14 +1417,14 @@ static int syn_stack_equal(synstate_T *sp)
         /* If the pointer is different it can still be the
          * same text.  Compare the strings, ignore case when
          * the start item has the sp_ic flag set. */
-        if (bsx->matches[j] == NULL
-            || six->matches[j] == NULL)
+        if (bsx->matches[j] == NULL || six->matches[j] == NULL) {
           break;
-        if ((SYN_ITEMS(syn_block)[CUR_STATE(i).si_idx]).sp_ic
-            ? mb_stricmp(bsx->matches[j],
-                six->matches[j]) != 0
-            : STRCMP(bsx->matches[j], six->matches[j]) != 0)
+        }
+        if (mb_strcmp_ic((SYN_ITEMS(syn_block)[CUR_STATE(i).si_idx]).sp_ic,
+                         (const char *)bsx->matches[j],
+                         (const char *)six->matches[j]) != 0) {
           break;
+        }
       }
     }
     if (j != NSUBEXP)
@@ -1489,7 +1500,7 @@ int syntax_check_changed(linenr_T lnum)
        * finish the previous line (needed when not all of the line was
        * drawn)
        */
-      (void)syn_finish_line(FALSE);
+      (void)syn_finish_line(false);
 
       /*
        * Compare the current state with the previously saved state of
@@ -1515,41 +1526,37 @@ int syntax_check_changed(linenr_T lnum)
  * the line.  It can start anywhere in the line, as long as the current state
  * is valid.
  */
-static int 
-syn_finish_line (
-    int syncing                    /* called for syncing */
+static bool
+syn_finish_line(
+    const bool syncing            // called for syncing
 )
 {
-  stateitem_T *cur_si;
-  colnr_T prev_current_col;
-
   while (!current_finished) {
-    (void)syn_current_attr(syncing, FALSE, NULL, FALSE);
-    /*
-     * When syncing, and found some item, need to check the item.
-     */
+    (void)syn_current_attr(syncing, false, NULL, false);
+
+    // When syncing, and found some item, need to check the item.
     if (syncing && current_state.ga_len) {
-      /*
-       * Check for match with sync item.
-       */
-      cur_si = &CUR_STATE(current_state.ga_len - 1);
+      // Check for match with sync item.
+      const stateitem_T *const cur_si = &CUR_STATE(current_state.ga_len - 1);
       if (cur_si->si_idx >= 0
           && (SYN_ITEMS(syn_block)[cur_si->si_idx].sp_flags
-              & (HL_SYNC_HERE|HL_SYNC_THERE)))
-        return TRUE;
+              & (HL_SYNC_HERE|HL_SYNC_THERE))) {
+        return true;
+      }
 
-      /* syn_current_attr() will have skipped the check for an item
-       * that ends here, need to do that now.  Be careful not to go
-       * past the NUL. */
-      prev_current_col = current_col;
-      if (syn_getcurline()[current_col] != NUL)
-        ++current_col;
+      // syn_current_attr() will have skipped the check for an item
+      // that ends here, need to do that now.  Be careful not to go
+      // past the NUL.
+      const colnr_T prev_current_col = current_col;
+      if (syn_getcurline()[current_col] != NUL) {
+        current_col++;
+      }
       check_state_ends();
       current_col = prev_current_col;
     }
-    ++current_col;
+    current_col++;
   }
-  return FALSE;
+  return false;
 }
 
 /*
@@ -1561,11 +1568,11 @@ syn_finish_line (
  * When "can_spell" is not NULL set it to TRUE when spell-checking should be
  * done.
  */
-int 
-get_syntax_attr (
-    colnr_T col,
-    bool *can_spell,
-    int keep_state                 /* keep state of char at "col" */
+int
+get_syntax_attr(
+    const colnr_T col,
+    bool *const can_spell,
+    const bool keep_state           // keep state of char at "col"
 )
 {
   int attr = 0;
@@ -1587,6 +1594,7 @@ get_syntax_attr (
     current_id = 0;
     current_trans_id = 0;
     current_flags = 0;
+    current_seqnr = 0;
     return 0;
   }
 
@@ -1598,9 +1606,9 @@ get_syntax_attr (
    * Skip from the current column to "col", get the attributes for "col".
    */
   while (current_col <= col) {
-    attr = syn_current_attr(FALSE, TRUE, can_spell,
-        current_col == col ? keep_state : FALSE);
-    ++current_col;
+    attr = syn_current_attr(false, true, can_spell,
+                            current_col == col ? keep_state : false);
+    current_col++;
   }
 
   return attr;
@@ -1609,42 +1617,37 @@ get_syntax_attr (
 /*
  * Get syntax attributes for current_lnum, current_col.
  */
-static int 
-syn_current_attr (
-    int syncing,                           /* When 1: called for syncing */
-    int displaying,                        /* result will be displayed */
-    bool *can_spell,                       /* return: do spell checking */
-    int keep_state                         /* keep syntax stack afterwards */
+static int syn_current_attr(
+    const bool syncing,                   // When true: called for syncing
+    const bool displaying,                // result will be displayed
+    bool *const can_spell,                // return: do spell checking
+    const bool keep_state                 // keep syntax stack afterwards
 )
 {
-  int syn_id;
-  lpos_T endpos;                /* was: char_u *endp; */
-  lpos_T hl_startpos;           /* was: int hl_startcol; */
+  lpos_T endpos;                // was: char_u *endp;
+  lpos_T hl_startpos;           // was: int hl_startcol;
   lpos_T hl_endpos;
-  lpos_T eos_pos;               /* end-of-start match (start region) */
-  lpos_T eoe_pos;               /* end-of-end pattern */
-  int end_idx;                  /* group ID for end pattern */
-  synpat_T    *spp;
+  lpos_T eos_pos;               // end-of-start match (start region)
+  lpos_T eoe_pos;               // end-of-end pattern
+  int end_idx;                  // group ID for end pattern
   stateitem_T *cur_si, *sip = NULL;
   int startcol;
   int endcol;
   long flags;
   int cchar;
-  short       *next_list;
-  int found_match;                          /* found usable match */
-  static int try_next_column = FALSE;       /* must try in next col */
-  int do_keywords;
+  int16_t *next_list;
+  bool found_match;                         // found usable match
+  static bool try_next_column = false;      // must try in next col
   regmmatch_T regmatch;
   lpos_T pos;
-  int lc_col;
   reg_extmatch_T *cur_extmatch = NULL;
   char_u      buf_chartab[32];  // chartab array for syn iskeyword
   char_u      *line;            // current line.  NOTE: becomes invalid after
                                 // looking for a pattern match!
 
-  /* variables for zero-width matches that have a "nextgroup" argument */
-  int keep_next_list;
-  int zero_width_next_list = FALSE;
+  // variables for zero-width matches that have a "nextgroup" argument
+  bool keep_next_list;
+  bool zero_width_next_list = false;
   garray_T zero_width_next_ga;
 
   /*
@@ -1657,8 +1660,9 @@ syn_current_attr (
      * If we found a match after the last column, use it.
      */
     if (next_match_idx >= 0 && next_match_col >= (int)current_col
-        && next_match_col != MAXCOL)
-      (void)push_next_match(NULL);
+        && next_match_col != MAXCOL) {
+      (void)push_next_match();
+    }
 
     current_finished = TRUE;
     current_state_stored = FALSE;
@@ -1678,13 +1682,13 @@ syn_current_attr (
    */
   if (try_next_column) {
     next_match_idx = -1;
-    try_next_column = FALSE;
+    try_next_column = false;
   }
 
-  /* Only check for keywords when not syncing and there are some. */
-  do_keywords = !syncing
-                && (syn_block->b_keywtab.ht_used > 0
-                    || syn_block->b_keywtab_ic.ht_used > 0);
+  // Only check for keywords when not syncing and there are some.
+  const bool do_keywords = !syncing
+      && (syn_block->b_keywtab.ht_used > 0
+          || syn_block->b_keywtab_ic.ht_used > 0);
 
   /* Init the list of zero-width matches with a nextlist.  This is used to
    * avoid matching the same item in the same position twice. */
@@ -1699,9 +1703,9 @@ syn_current_attr (
    * column.
    */
   do {
-    found_match = FALSE;
-    keep_next_list = FALSE;
-    syn_id = 0;
+    found_match = false;
+    keep_next_list = false;
+    int syn_id = 0;
 
     /*
      * 1. Check for a current state.
@@ -1723,16 +1727,12 @@ syn_current_attr (
        */
       if (do_keywords) {
         line = syn_getcurline();
-        if (vim_iswordp_buf(line + current_col, syn_buf)
-            && (current_col == 0
-                || !vim_iswordp_buf(line + current_col - 1
-                    - (has_mbyte
-                       ? (*mb_head_off)(line, line + current_col - 1)
-                       : 0)
-                    , syn_buf))) {
-          syn_id = check_keyword_id(line, (int)current_col,
-              &endcol, &flags, &next_list, cur_si,
-              &cchar);
+        const char_u *cur_pos = line + current_col;
+        if (vim_iswordp_buf(cur_pos, syn_buf)
+            && (current_col == 0 || !vim_iswordp_buf(
+                cur_pos - 1 - utf_head_off(line, cur_pos - 1), syn_buf))) {
+          syn_id = check_keyword_id(line, (int)current_col, &endcol, &flags,
+                                    &next_list, cur_si, &cchar);
           if (syn_id != 0) {
             push_current_state(KEYWORD_IDX);
             {
@@ -1765,8 +1765,9 @@ syn_current_attr (
                   cur_si->si_trans_id = CUR_STATE(
                       current_state.ga_len - 2).si_trans_id;
                 }
-              } else
+              } else {
                 cur_si->si_attr = syn_id2attr(syn_id);
+              }
               cur_si->si_cont_list = NULL;
               cur_si->si_next_list = next_list;
               check_keepend();
@@ -1793,7 +1794,7 @@ syn_current_attr (
           next_match_idx = 0;                   /* no match in this line yet */
           next_match_col = MAXCOL;
           for (int idx = syn_block->b_syn_patterns.ga_len; --idx >= 0; ) {
-            spp = &(SYN_ITEMS(syn_block)[idx]);
+            synpat_T *const spp = &(SYN_ITEMS(syn_block)[idx]);
             if (       spp->sp_syncing == syncing
                        && (displaying || !(spp->sp_flags & HL_DISPLAY))
                        && (spp->sp_type == SPTYPE_MATCH
@@ -1814,13 +1815,14 @@ syn_current_attr (
                 continue;
               spp->sp_line_id = current_line_id;
 
-              lc_col = current_col - spp->sp_offsets[SPO_LC_OFF];
-              if (lc_col < 0)
+              colnr_T lc_col = current_col - spp->sp_offsets[SPO_LC_OFF];
+              if (lc_col < 0) {
                 lc_col = 0;
+              }
 
               regmatch.rmm_ic = spp->sp_ic;
               regmatch.regprog = spp->sp_prog;
-              int r = syn_regexec(&regmatch, current_lnum, (colnr_T)lc_col,
+              int r = syn_regexec(&regmatch, current_lnum, lc_col,
                                   IF_SYN_TIME(&spp->sp_time));
               spp->sp_prog = regmatch.regprog;
               if (!r) {
@@ -1859,7 +1861,7 @@ syn_current_attr (
                * column, because it may match from there.
                */
               if (did_match_already(idx, &zero_width_next_ga)) {
-                try_next_column = TRUE;
+                try_next_column = true;
                 continue;
               }
 
@@ -1921,9 +1923,9 @@ syn_current_attr (
                    * If an empty string is matched, may need
                    * to try matching again at next column.
                    */
-                  if (regmatch.startpos[0].col
-                      == regmatch.endpos[0].col)
-                    try_next_column = TRUE;
+                  if (regmatch.startpos[0].col == regmatch.endpos[0].col) {
+                    try_next_column = true;
+                  }
                   continue;
                 }
               }
@@ -1968,17 +1970,18 @@ syn_current_attr (
               && lspp->sp_next_list != NULL) {
             current_next_list = lspp->sp_next_list;
             current_next_flags = lspp->sp_flags;
-            keep_next_list = TRUE;
-            zero_width_next_list = TRUE;
+            keep_next_list = true;
+            zero_width_next_list = true;
 
             /* Add the index to a list, so that we can check
              * later that we don't match it again (and cause an
              * endless loop). */
             GA_APPEND(int, &zero_width_next_ga, next_match_idx);
             next_match_idx = -1;
-          } else
-            cur_si = push_next_match(cur_si);
-          found_match = TRUE;
+          } else {
+            cur_si = push_next_match();
+          }
+          found_match = true;
         }
       }
     }
@@ -2011,8 +2014,9 @@ syn_current_attr (
        */
       current_next_list = NULL;
       next_match_idx = -1;
-      if (!zero_width_next_list)
-        found_match = TRUE;
+      if (!zero_width_next_list) {
+        found_match = true;
+      }
     }
 
   } while (found_match);
@@ -2027,6 +2031,7 @@ syn_current_attr (
   current_id = 0;
   current_trans_id = 0;
   current_flags = 0;
+  current_seqnr = 0;
   if (cur_si != NULL) {
     for (int idx = current_state.ga_len - 1; idx >= 0; --idx) {
       sip = &CUR_STATE(idx);
@@ -2115,9 +2120,11 @@ syn_current_attr (
 
   /* nextgroup ends at end of line, unless "skipnl" or "skipempty" present */
   if (current_next_list != NULL
-      && syn_getcurline()[current_col + 1] == NUL
-      && !(current_next_flags & (HL_SKIPNL | HL_SKIPEMPTY)))
+      && (line = syn_getcurline())[current_col] != NUL
+      && line[current_col + 1] == NUL
+      && !(current_next_flags & (HL_SKIPNL | HL_SKIPEMPTY))) {
     current_next_list = NULL;
+  }
 
   if (!GA_EMPTY(&zero_width_next_ga))
     ga_clear(&zero_width_next_ga);
@@ -2158,9 +2165,10 @@ static int did_match_already(int idx, garray_T *gap)
 /*
  * Push the next match onto the stack.
  */
-static stateitem_T *push_next_match(stateitem_T *cur_si)
+static stateitem_T *push_next_match(void)
 {
-  synpat_T    *spp;
+  stateitem_T *cur_si;
+  synpat_T *spp;
   int save_flags;
 
   spp = &(SYN_ITEMS(syn_block)[next_match_idx]);
@@ -2436,8 +2444,8 @@ static void check_keepend(void)
  *
  * Return the flags for the matched END.
  */
-static void 
-update_si_end (
+static void
+update_si_end(
     stateitem_T *sip,
     int startcol,               /* where to start searching for the end */
     int force                  /* when TRUE overrule a previous end */
@@ -2529,16 +2537,16 @@ static void pop_current_state(void)
  * If found, the end of the region and the end of the highlighting is
  * computed.
  */
-static void 
-find_endpos (
-    int idx,                        /* index of the pattern */
-    lpos_T *startpos,          /* where to start looking for an END match */
-    lpos_T *m_endpos,          /* return: end of match */
-    lpos_T *hl_endpos,         /* return: end of highlighting */
-    long *flagsp,            /* return: flags of matching END */
-    lpos_T *end_endpos,        /* return: end of end pattern match */
-    int *end_idx,           /* return: group ID for end pat. match, or 0 */
-    reg_extmatch_T *start_ext      /* submatches from the start pattern */
+static void
+find_endpos(
+    int idx,                    // index of the pattern
+    lpos_T *startpos,           // where to start looking for an END match
+    lpos_T *m_endpos,           // return: end of match
+    lpos_T *hl_endpos,          // return: end of highlighting
+    long *flagsp,               // return: flags of matching END
+    lpos_T *end_endpos,         // return: end of end pattern match
+    int *end_idx,               // return: group ID for end pat. match, or 0
+    reg_extmatch_T *start_ext   // submatches from the start pattern
 )
 {
   colnr_T matchcol;
@@ -2771,13 +2779,13 @@ static void limit_pos_zero(lpos_T *pos, lpos_T *limit)
 /*
  * Add offset to matched text for end of match or highlight.
  */
-static void 
-syn_add_end_off (
-    lpos_T *result,            /* returned position */
-    regmmatch_T *regmatch,          /* start/end of match */
-    synpat_T *spp,               /* matched pattern */
-    int idx,                        /* index of offset */
-    int extra                      /* extra chars for offset to start */
+static void
+syn_add_end_off(
+    lpos_T *result,           // returned position
+    regmmatch_T *regmatch,    // start/end of match
+    synpat_T *spp,            // matched pattern
+    int idx,                  // index of offset
+    int extra                 // extra chars for offset to start
 )
 {
   int col;
@@ -2802,11 +2810,13 @@ syn_add_end_off (
     base = ml_get_buf(syn_buf, result->lnum, FALSE);
     p = base + col;
     if (off > 0) {
-      while (off-- > 0 && *p != NUL)
-        mb_ptr_adv(p);
-    } else if (off < 0)   {
-      while (off++ < 0 && base < p)
-        mb_ptr_back(base, p);
+      while (off-- > 0 && *p != NUL) {
+        MB_PTR_ADV(p);
+      }
+    } else {
+      while (off++ < 0 && base < p) {
+        MB_PTR_BACK(base, p);
+      }
     }
     col = (int)(p - base);
   }
@@ -2817,13 +2827,13 @@ syn_add_end_off (
  * Add offset to matched text for start of match or highlight.
  * Avoid resulting column to become negative.
  */
-static void 
-syn_add_start_off (
-    lpos_T *result,            /* returned position */
-    regmmatch_T *regmatch,          /* start/end of match */
+static void
+syn_add_start_off(
+    lpos_T *result,           // returned position
+    regmmatch_T *regmatch,    // start/end of match
     synpat_T *spp,
     int idx,
-    int extra                  /* extra chars for offset to end */
+    int extra                 // extra chars for offset to end
 )
 {
   int col;
@@ -2849,11 +2859,13 @@ syn_add_start_off (
     base = ml_get_buf(syn_buf, result->lnum, FALSE);
     p = base + col;
     if (off > 0) {
-      while (off-- && *p != NUL)
-        mb_ptr_adv(p);
-    } else if (off < 0)   {
-      while (off++ && base < p)
-        mb_ptr_back(base, p);
+      while (off-- && *p != NUL) {
+        MB_PTR_ADV(p);
+      }
+    } else {
+      while (off++ && base < p) {
+        MB_PTR_BACK(base, p);
+      }
     }
     col = (int)(p - base);
   }
@@ -2882,6 +2894,13 @@ static int syn_regexec(regmmatch_T *rmp, linenr_T lnum, colnr_T col, syn_time_T 
     pt = profile_start();
   }
 
+  if (rmp->regprog == NULL) {
+    // This can happen if a previous call to vim_regexec_multi() tried to
+    // use the NFA engine, which resulted in NFA_TOO_EXPENSIVE, and
+    // compiling the pattern with the other engine fails.
+    return false;
+  }
+
   rmp->rmm_maxcol = syn_buf->b_p_smc;
   r = vim_regexec_multi(rmp, syn_win, syn_buf, lnum, col, NULL);
 
@@ -2907,41 +2926,37 @@ static int syn_regexec(regmmatch_T *rmp, linenr_T lnum, colnr_T col, syn_time_T 
 /*
  * Check one position in a line for a matching keyword.
  * The caller must check if a keyword can start at startcol.
- * Return it's ID if found, 0 otherwise.
+ * Return its ID if found, 0 otherwise.
  */
-static int 
-check_keyword_id (
-    char_u *line,
-    int startcol,                   /* position in line to check for keyword */
-    int *endcolp,           /* return: character after found keyword */
-    long *flagsp,            /* return: flags of matching keyword */
-    short **next_listp,       /* return: next_list of matching keyword */
-    stateitem_T *cur_si,            /* item at the top of the stack */
-    int *ccharp     /* conceal substitution char */
+static int check_keyword_id(
+    char_u *const line,
+    const int startcol,           // position in line to check for keyword
+    int *const endcolp,           // return: character after found keyword
+    long *const flagsp,           // return: flags of matching keyword
+    int16_t **const next_listp,   // return: next_list of matching keyword
+    stateitem_T *const cur_si,    // item at the top of the stack
+    int *const ccharp             // conceal substitution char
 )
 {
-  char_u      *kwp;
-  int kwlen;
-  char_u keyword[MAXKEYWLEN + 1];        /* assume max. keyword len is 80 */
-
-  /* Find first character after the keyword.  First character was already
-   * checked. */
-  kwp = line + startcol;
-  kwlen = 0;
+  // Find first character after the keyword.  First character was already
+  // checked.
+  char_u *const kwp = line + startcol;
+  int kwlen = 0;
   do {
-    if (has_mbyte)
+    if (has_mbyte) {
       kwlen += (*mb_ptr2len)(kwp + kwlen);
-    else
-      ++kwlen;
+    } else {
+      kwlen++;
+    }
   } while (vim_iswordp_buf(kwp + kwlen, syn_buf));
 
-  if (kwlen > MAXKEYWLEN)
+  if (kwlen > MAXKEYWLEN) {
     return 0;
+  }
 
-  /*
-   * Must make a copy of the keyword, so we can add a NUL and make it
-   * lowercase.
-   */
+  // Must make a copy of the keyword, so we can add a NUL and make it
+  // lowercase.
+  char_u keyword[MAXKEYWLEN + 1];         // assume max. keyword len is 80
   STRLCPY(keyword, kwp, kwlen + 1);
 
   keyentry_T *kp = NULL;
@@ -3004,12 +3019,19 @@ static void syn_cmd_conceal(exarg_T *eap, int syncing)
     return;
 
   next = skiptowhite(arg);
-  if (STRNICMP(arg, "on", 2) == 0 && next - arg == 2)
-    curwin->w_s->b_syn_conceal = TRUE;
-  else if (STRNICMP(arg, "off", 3) == 0 && next - arg == 3)
-    curwin->w_s->b_syn_conceal = FALSE;
-  else
+  if (*arg == NUL) {
+    if (curwin->w_s->b_syn_conceal) {
+      MSG(_("syntax conceal on"));
+    } else {
+      MSG(_("syntax conceal off"));
+    }
+  } else if (STRNICMP(arg, "on", 2) == 0 && next - arg == 2) {
+    curwin->w_s->b_syn_conceal = true;
+  } else if (STRNICMP(arg, "off", 3) == 0 && next - arg == 3) {
+    curwin->w_s->b_syn_conceal = false;
+  } else {
     EMSG2(_("E390: Illegal argument: %s"), arg);
+  }
 }
 
 /*
@@ -3025,12 +3047,19 @@ static void syn_cmd_case(exarg_T *eap, int syncing)
     return;
 
   next = skiptowhite(arg);
-  if (STRNICMP(arg, "match", 5) == 0 && next - arg == 5)
-    curwin->w_s->b_syn_ic = FALSE;
-  else if (STRNICMP(arg, "ignore", 6) == 0 && next - arg == 6)
-    curwin->w_s->b_syn_ic = TRUE;
-  else
+  if (*arg == NUL) {
+    if (curwin->w_s->b_syn_ic) {
+      MSG(_("syntax case ignore"));
+    } else {
+      MSG(_("syntax case match"));
+    }
+  } else if (STRNICMP(arg, "match", 5) == 0 && next - arg == 5) {
+    curwin->w_s->b_syn_ic = false;
+  } else if (STRNICMP(arg, "ignore", 6) == 0 && next - arg == 6) {
+    curwin->w_s->b_syn_ic = true;
+  } else {
     EMSG2(_("E390: Illegal argument: %s"), arg);
+  }
 }
 
 /*
@@ -3046,7 +3075,15 @@ static void syn_cmd_spell(exarg_T *eap, int syncing)
     return;
 
   next = skiptowhite(arg);
-  if (STRNICMP(arg, "toplevel", 8) == 0 && next - arg == 8) {
+  if (*arg == NUL) {
+    if (curwin->w_s->b_syn_spell == SYNSPL_TOP) {
+      MSG(_("syntax spell toplevel"));
+    } else if (curwin->w_s->b_syn_spell == SYNSPL_NOTOP) {
+      MSG(_("syntax spell notoplevel"));
+    } else {
+      MSG(_("syntax spell default"));
+    }
+  } else if (STRNICMP(arg, "toplevel", 8) == 0 && next - arg == 8) {
     curwin->w_s->b_syn_spell = SYNSPL_TOP;
   } else if (STRNICMP(arg, "notoplevel", 10) == 0 && next - arg == 10) {
     curwin->w_s->b_syn_spell = SYNSPL_NOTOP;
@@ -3106,10 +3143,11 @@ static void syn_cmd_iskeyword(exarg_T *eap, int syncing)
  */
 void syntax_clear(synblock_T *block)
 {
-  block->b_syn_error = FALSE;       /* clear previous error */
-  block->b_syn_ic = FALSE;          /* Use case, by default */
-  block->b_syn_spell = SYNSPL_DEFAULT;   /* default spell checking */
-  block->b_syn_containedin = FALSE;
+  block->b_syn_error = false;           // clear previous error
+  block->b_syn_ic = false;              // Use case, by default
+  block->b_syn_spell = SYNSPL_DEFAULT;  // default spell checking
+  block->b_syn_containedin = false;
+  block->b_syn_conceal = false;
 
   /* free the keywords */
   clear_keywtab(&block->b_keywtab);
@@ -3259,9 +3297,10 @@ static void syn_cmd_clear(exarg_T *eap, int syncing)
       syntax_sync_clear();
     else {
       syntax_clear(curwin->w_s);
-      if (curwin->w_s == &curwin->w_buffer->b_s)
-        do_unlet((char_u *)"b:current_syntax", TRUE);
-      do_unlet((char_u *)"w:current_syntax", TRUE);
+      if (curwin->w_s == &curwin->w_buffer->b_s) {
+        do_unlet(S_LEN("b:current_syntax"), true);
+      }
+      do_unlet(S_LEN("w:current_syntax"), true);
     }
   } else {
     /*
@@ -3275,12 +3314,10 @@ static void syn_cmd_clear(exarg_T *eap, int syncing)
           EMSG2(_("E391: No such syntax cluster: %s"), arg);
           break;
         } else {
-          /*
-           * We can't physically delete a cluster without changing
-           * the IDs of other clusters, so we do the next best thing
-           * and make it empty.
-           */
-          short scl_id = id - SYNID_CLUSTER;
+          // We can't physically delete a cluster without changing
+          // the IDs of other clusters, so we do the next best thing
+          // and make it empty.
+          int scl_id = id - SYNID_CLUSTER;
 
           xfree(SYN_CLSTR(curwin->w_s)[scl_id].scl_list);
           SYN_CLSTR(curwin->w_s)[scl_id].scl_list = NULL;
@@ -3303,7 +3340,7 @@ static void syn_cmd_clear(exarg_T *eap, int syncing)
 /*
  * Clear one syntax group for the current buffer.
  */
-static void syn_clear_one(int id, int syncing)
+static void syn_clear_one(const int id, const bool syncing)
 {
   synpat_T    *spp;
 
@@ -3337,7 +3374,7 @@ static void syn_cmd_enable(exarg_T *eap, int syncing)
 {
   set_internal_string_var((char_u *)"syntax_cmd", (char_u *)"enable");
   syn_cmd_onoff(eap, "syntax");
-  do_unlet((char_u *)"g:syntax_cmd", TRUE);
+  do_unlet(S_LEN("g:syntax_cmd"), true);
 }
 
 /*
@@ -3350,7 +3387,7 @@ static void syn_cmd_reset(exarg_T *eap, int syncing)
   if (!eap->skip) {
     set_internal_string_var((char_u *)"syntax_cmd", (char_u *)"reset");
     do_cmdline_cmd("runtime! syntax/syncolor.vim");
-    do_unlet((char_u *)"g:syntax_cmd", TRUE);
+    do_unlet(S_LEN("g:syntax_cmd"), true);
   }
 }
 
@@ -3373,11 +3410,11 @@ static void syn_cmd_off(exarg_T *eap, int syncing)
 static void syn_cmd_onoff(exarg_T *eap, char *name)
   FUNC_ATTR_NONNULL_ALL
 {
-  did_syntax_onoff = true;
   eap->nextcmd = check_nextcmd(eap->arg);
   if (!eap->skip) {
+    did_syntax_onoff = true;
     char buf[100];
-    strncpy(buf, "so ", 4);
+    memcpy(buf, "so ", 4);
     vim_snprintf(buf + 3, sizeof(buf) - 3, SYNTAX_FNAME, name);
     do_cmdline_cmd(buf);
   }
@@ -3396,8 +3433,8 @@ void syn_maybe_on(void)
 /*
  * Handle ":syntax [list]" command: list current syntax words.
  */
-static void 
-syn_cmd_list (
+static void
+syn_cmd_list(
     exarg_T *eap,
     int syncing                        /* when TRUE: list syncing items */
 )
@@ -3445,8 +3482,8 @@ syn_cmd_list (
     /*
      * No argument: List all group IDs and all syntax clusters.
      */
-    for (int id = 1; id <= highlight_ga.ga_len && !got_int; ++id) {
-      syn_list_one(id, syncing, FALSE);
+    for (int id = 1; id <= highlight_ga.ga_len && !got_int; id++) {
+      syn_list_one(id, syncing, false);
     }
     for (int id = 0; id < curwin->w_s->b_syn_clusters.ga_len && !got_int; ++id) {
       syn_list_cluster(id);
@@ -3465,10 +3502,11 @@ syn_cmd_list (
           syn_list_cluster(id - SYNID_CLUSTER);
       } else {
         int id = syn_namen2id(arg, (int)(arg_end - arg));
-        if (id == 0)
+        if (id == 0) {
           EMSG2(_(e_nogroup), arg);
-        else
-          syn_list_one(id, syncing, TRUE);
+        } else {
+          syn_list_one(id, syncing, true);
+        }
       }
       arg = skipwhite(arg_end);
     }
@@ -3510,16 +3548,14 @@ static int last_matchgroup;
 /*
  * List one syntax item, for ":syntax" or "syntax list syntax_name".
  */
-static void 
-syn_list_one (
-    int id,
-    int syncing,                        /* when TRUE: list syncing items */
-    int link_only                      /* when TRUE; list link-only too */
+static void
+syn_list_one(
+    const int id,
+    const bool syncing,                 // when true: list syncing items
+    const bool link_only                // when true; list link-only too
 )
 {
-  int attr;
-  int did_header = FALSE;
-  synpat_T    *spp;
+  bool did_header = false;
   static struct name_list namelist1[] =
   {
     {HL_DISPLAY, "display"},
@@ -3542,23 +3578,26 @@ syn_list_one (
     {0, NULL}
   };
 
-  attr = hl_attr(HLF_D);                /* highlight like directories */
+  const int attr = HL_ATTR(HLF_D);      // highlight like directories
 
-  /* list the keywords for "id" */
+  // list the keywords for "id"
   if (!syncing) {
-    did_header = syn_list_keywords(id, &curwin->w_s->b_keywtab, FALSE, attr);
+    did_header = syn_list_keywords(id, &curwin->w_s->b_keywtab, false, attr);
     did_header = syn_list_keywords(id, &curwin->w_s->b_keywtab_ic,
-        did_header, attr);
+                                   did_header, attr);
   }
 
-  /* list the patterns for "id" */
-  for (int idx = 0; idx < curwin->w_s->b_syn_patterns.ga_len && !got_int; ++idx) {
-    spp = &(SYN_ITEMS(curwin->w_s)[idx]);
-    if (spp->sp_syn.id != id || spp->sp_syncing != syncing)
+  // list the patterns for "id"
+  for (int idx = 0;
+       idx < curwin->w_s->b_syn_patterns.ga_len && !got_int;
+       idx++) {
+    const synpat_T *const spp = &(SYN_ITEMS(curwin->w_s)[idx]);
+    if (spp->sp_syn.id != id || spp->sp_syncing != syncing) {
       continue;
+    }
 
     (void)syn_list_header(did_header, 999, id);
-    did_header = TRUE;
+    did_header = true;
     last_matchgroup = 0;
     if (spp->sp_type == SPTYPE_MATCH) {
       put_pattern("match", ' ', spp, attr);
@@ -3576,22 +3615,24 @@ syn_list_one (
     }
     syn_list_flags(namelist1, spp->sp_flags, attr);
 
-    if (spp->sp_cont_list != NULL)
-      put_id_list((char_u *)"contains", spp->sp_cont_list, attr);
+    if (spp->sp_cont_list != NULL) {
+      put_id_list("contains", spp->sp_cont_list, attr);
+    }
 
-    if (spp->sp_syn.cont_in_list != NULL)
-      put_id_list((char_u *)"containedin",
-          spp->sp_syn.cont_in_list, attr);
+    if (spp->sp_syn.cont_in_list != NULL) {
+      put_id_list("containedin", spp->sp_syn.cont_in_list, attr);
+    }
 
     if (spp->sp_next_list != NULL) {
-      put_id_list((char_u *)"nextgroup", spp->sp_next_list, attr);
+      put_id_list("nextgroup", spp->sp_next_list, attr);
       syn_list_flags(namelist2, spp->sp_flags, attr);
     }
     if (spp->sp_flags & (HL_SYNC_HERE|HL_SYNC_THERE)) {
-      if (spp->sp_flags & HL_SYNC_HERE)
-        msg_puts_attr((char_u *)"grouphere", attr);
-      else
-        msg_puts_attr((char_u *)"groupthere", attr);
+      if (spp->sp_flags & HL_SYNC_HERE) {
+        msg_puts_attr("grouphere", attr);
+      } else {
+        msg_puts_attr("groupthere", attr);
+      }
       msg_putchar(' ');
       if (spp->sp_sync_idx >= 0)
         msg_outtrans(HL_TABLE()[SYN_ITEMS(curwin->w_s)
@@ -3605,7 +3646,7 @@ syn_list_one (
   /* list the link, if there is one */
   if (HL_TABLE()[id - 1].sg_link && (did_header || link_only) && !got_int) {
     (void)syn_list_header(did_header, 999, id);
-    msg_puts_attr((char_u *)"links to", attr);
+    msg_puts_attr("links to", attr);
     msg_putchar(' ');
     msg_outtrans(HL_TABLE()[HL_TABLE()[id - 1].sg_link - 1].sg_name);
   }
@@ -3617,7 +3658,7 @@ static void syn_list_flags(struct name_list *nlist, int flags, int attr)
 
   for (i = 0; nlist[i].flag != 0; ++i)
     if (flags & nlist[i].flag) {
-      msg_puts_attr((char_u *)nlist[i].name, attr);
+      msg_puts_attr(nlist[i].name, attr);
       msg_putchar(' ');
     }
 }
@@ -3640,32 +3681,32 @@ static void syn_list_cluster(int id)
 
   msg_advance(endcol);
   if (SYN_CLSTR(curwin->w_s)[id].scl_list != NULL) {
-    put_id_list((char_u *)"cluster", SYN_CLSTR(curwin->w_s)[id].scl_list,
-        hl_attr(HLF_D));
+    put_id_list("cluster", SYN_CLSTR(curwin->w_s)[id].scl_list, HL_ATTR(HLF_D));
   } else {
-    msg_puts_attr((char_u *)"cluster", hl_attr(HLF_D));
-    msg_puts((char_u *)"=NONE");
+    msg_puts_attr("cluster", HL_ATTR(HLF_D));
+    msg_puts("=NONE");
   }
 }
 
-static void put_id_list(char_u *name, short *list, int attr)
+static void put_id_list(const char *const name,
+                        const int16_t *const list,
+                        const int attr)
 {
-  short               *p;
-
   msg_puts_attr(name, attr);
   msg_putchar('=');
-  for (p = list; *p; ++p) {
+  for (const int16_t *p = list; *p; p++) {
     if (*p >= SYNID_ALLBUT && *p < SYNID_TOP) {
-      if (p[1])
-        MSG_PUTS("ALLBUT");
-      else
-        MSG_PUTS("ALL");
+      if (p[1]) {
+        msg_puts("ALLBUT");
+      } else {
+        msg_puts("ALL");
+      }
     } else if (*p >= SYNID_TOP && *p < SYNID_CONTAINED)   {
-      MSG_PUTS("TOP");
+      msg_puts("TOP");
     } else if (*p >= SYNID_CONTAINED && *p < SYNID_CLUSTER)   {
-      MSG_PUTS("CONTAINED");
+      msg_puts("CONTAINED");
     } else if (*p >= SYNID_CLUSTER)   {
-      short scl_id = *p - SYNID_CLUSTER;
+      int scl_id = *p - SYNID_CLUSTER;
 
       msg_putchar('@');
       msg_outtrans(SYN_CLSTR(curwin->w_s)[scl_id].scl_name);
@@ -3677,18 +3718,16 @@ static void put_id_list(char_u *name, short *list, int attr)
   msg_putchar(' ');
 }
 
-static void put_pattern(char *s, int c, synpat_T *spp, int attr)
+static void put_pattern(const char *const s, const int c,
+                        const synpat_T *const spp, const int attr)
 {
-  long n;
-  int mask;
-  int first;
-  static char *sepchars = "/+=-#@\"|'^&";
+  static const char *const sepchars = "/+=-#@\"|'^&";
   int i;
 
   /* May have to write "matchgroup=group" */
   if (last_matchgroup != spp->sp_syn_match_id) {
     last_matchgroup = spp->sp_syn_match_id;
-    msg_puts_attr((char_u *)"matchgroup", attr);
+    msg_puts_attr("matchgroup", attr);
     msg_putchar('=');
     if (last_matchgroup == 0)
       msg_outtrans((char_u *)"NONE");
@@ -3697,8 +3736,8 @@ static void put_pattern(char *s, int c, synpat_T *spp, int attr)
     msg_putchar(' ');
   }
 
-  /* output the name of the pattern and an '=' or ' ' */
-  msg_puts_attr((char_u *)s, attr);
+  // Output the name of the pattern and an '=' or ' '.
+  msg_puts_attr(s, attr);
   msg_putchar(c);
 
   /* output the pattern, in between a char that is not in the pattern */
@@ -3711,17 +3750,18 @@ static void put_pattern(char *s, int c, synpat_T *spp, int attr)
   msg_outtrans(spp->sp_pattern);
   msg_putchar(sepchars[i]);
 
-  /* output any pattern options */
-  first = TRUE;
-  for (i = 0; i < SPO_COUNT; ++i) {
-    mask = (1 << i);
+  // output any pattern options
+  bool first = true;
+  for (i = 0; i < SPO_COUNT; i++) {
+    const int mask = (1 << i);
     if (!(spp->sp_off_flags & (mask + (mask << SPO_COUNT)))) {
       continue;
     }
-    if (!first)
-      msg_putchar(',');               /* separate with commas */
-    msg_puts((char_u *)spo_name_tab[i]);
-    n = spp->sp_offsets[i];
+    if (!first) {
+      msg_putchar(',');  // Separate with commas.
+    }
+    msg_puts(spo_name_tab[i]);
+    const long n = spp->sp_offsets[i];
     if (i != SPO_LC_OFF) {
       if (spp->sp_off_flags & mask)
         msg_putchar('s');
@@ -3730,47 +3770,40 @@ static void put_pattern(char *s, int c, synpat_T *spp, int attr)
       if (n > 0)
         msg_putchar('+');
     }
-    if (n || i == SPO_LC_OFF)
+    if (n || i == SPO_LC_OFF) {
       msg_outnum(n);
-    first = FALSE;
+    }
+    first = false;
   }
   msg_putchar(' ');
 }
 
-/*
- * List or clear the keywords for one syntax group.
- * Return TRUE if the header has been printed.
- */
-static int 
-syn_list_keywords (
-    int id,
-    hashtab_T *ht,
-    int did_header,                         /* header has already been printed */
-    int attr
+// List or clear the keywords for one syntax group.
+// Return true if the header has been printed.
+static bool syn_list_keywords(
+    const int id,
+    const hashtab_T *const ht,
+    bool did_header,                        // header has already been printed
+    const int attr
 )
 {
   int outlen;
-  hashitem_T  *hi;
-  keyentry_T  *kp;
-  int todo;
   int prev_contained = 0;
-  short       *prev_next_list = NULL;
-  short       *prev_cont_in_list = NULL;
+  const int16_t *prev_next_list = NULL;
+  const int16_t *prev_cont_in_list = NULL;
   int prev_skipnl = 0;
   int prev_skipwhite = 0;
   int prev_skipempty = 0;
 
-  /*
-   * Unfortunately, this list of keywords is not sorted on alphabet but on
-   * hash value...
-   */
-  todo = (int)ht->ht_used;
-  for (hi = ht->ht_array; todo > 0 && !got_int; ++hi) {
+  // Unfortunately, this list of keywords is not sorted on alphabet but on
+  // hash value...
+  size_t todo = ht->ht_used;
+  for (const hashitem_T *hi = ht->ht_array; todo > 0 && !got_int; hi++) {
     if (HASHITEM_EMPTY(hi)) {
       continue;
     }
-    --todo;
-    for (kp = HI2KE(hi); kp != NULL && !got_int; kp = kp->ke_next) {
+    todo--;
+    for (keyentry_T *kp = HI2KE(hi); kp != NULL && !got_int; kp = kp->ke_next) {
       if (kp->k_syn.id == id) {
         if (prev_contained != (kp->flags & HL_CONTAINED)
             || prev_skipnl != (kp->flags & HL_SKIPNL)
@@ -3790,34 +3823,33 @@ syn_list_keywords (
           prev_skipwhite = 0;
           prev_skipempty = 0;
         }
-        did_header = TRUE;
+        did_header = true;
         if (prev_contained != (kp->flags & HL_CONTAINED)) {
-          msg_puts_attr((char_u *)"contained", attr);
+          msg_puts_attr("contained", attr);
           msg_putchar(' ');
           prev_contained = (kp->flags & HL_CONTAINED);
         }
         if (kp->k_syn.cont_in_list != prev_cont_in_list) {
-          put_id_list((char_u *)"containedin",
-              kp->k_syn.cont_in_list, attr);
+          put_id_list("containedin", kp->k_syn.cont_in_list, attr);
           msg_putchar(' ');
           prev_cont_in_list = kp->k_syn.cont_in_list;
         }
         if (kp->next_list != prev_next_list) {
-          put_id_list((char_u *)"nextgroup", kp->next_list, attr);
+          put_id_list("nextgroup", kp->next_list, attr);
           msg_putchar(' ');
           prev_next_list = kp->next_list;
           if (kp->flags & HL_SKIPNL) {
-            msg_puts_attr((char_u *)"skipnl", attr);
+            msg_puts_attr("skipnl", attr);
             msg_putchar(' ');
             prev_skipnl = (kp->flags & HL_SKIPNL);
           }
           if (kp->flags & HL_SKIPWHITE) {
-            msg_puts_attr((char_u *)"skipwhite", attr);
+            msg_puts_attr("skipwhite", attr);
             msg_putchar(' ');
             prev_skipwhite = (kp->flags & HL_SKIPWHITE);
           }
           if (kp->flags & HL_SKIPEMPTY) {
-            msg_puts_attr((char_u *)"skipempty", attr);
+            msg_puts_attr("skipempty", attr);
             msg_putchar(' ');
             prev_skipempty = (kp->flags & HL_SKIPEMPTY);
           }
@@ -3902,19 +3934,19 @@ static void clear_keywtab(hashtab_T *ht)
 /// @param flags flags for this keyword
 /// @param cont_in_list containedin for this keyword
 /// @param next_list nextgroup for this keyword
-static void add_keyword(char_u *name,
-                        int id,
-                        int flags,
-                        short *cont_in_list,
-                        short *next_list,
-                        int conceal_char)
+static void add_keyword(char_u *const name,
+                        const int id,
+                        const int flags,
+                        int16_t *const cont_in_list,
+                        int16_t *const next_list,
+                        const int conceal_char)
 {
   char_u name_folded[MAXKEYWLEN + 1];
-  char_u *name_ic = (curwin->w_s->b_syn_ic)
-   ? str_foldcase(name, (int)STRLEN(name), name_folded, sizeof(name_folded))
-   : name;
+  const char_u *const name_ic = (curwin->w_s->b_syn_ic)
+      ? str_foldcase(name, (int)STRLEN(name), name_folded, sizeof(name_folded))
+      : name;
 
-  keyentry_T *kp = xmalloc(sizeof(keyentry_T) + STRLEN(name_ic));
+  keyentry_T *const kp = xmalloc(sizeof(keyentry_T) + STRLEN(name_ic));
   STRCPY(kp->keyword, name_ic);
   kp->k_syn.id = id;
   kp->k_syn.inc_tag = current_syn_inc_tag;
@@ -3926,10 +3958,12 @@ static void add_keyword(char_u *name,
   }
   kp->next_list = copy_id_list(next_list);
 
-  hash_T hash = hash_hash(kp->keyword);
-  hashtab_T *ht = (curwin->w_s->b_syn_ic) ? &curwin->w_s->b_keywtab_ic
-                                          : &curwin->w_s->b_keywtab;
-  hashitem_T *hi = hash_lookup(ht, kp->keyword, hash);
+  const hash_T hash = hash_hash(kp->keyword);
+  hashtab_T *const ht = (curwin->w_s->b_syn_ic)
+      ? &curwin->w_s->b_keywtab_ic
+      : &curwin->w_s->b_keywtab;
+  hashitem_T *const hi = hash_lookup(ht, (const char *)kp->keyword,
+                                     STRLEN(kp->keyword), hash);
 
   // even though it looks like only the kp->keyword member is
   // being used here, vim uses some pointer trickery to get the orignal
@@ -3980,18 +4014,19 @@ get_group_name (
  * Return NULL for any error;
  */
 static char_u *
-get_syn_options (
-    char_u *arg,                   /* next argument to be checked */
-    syn_opt_arg_T *opt,                   /* various things */
-    int *conceal_char
+get_syn_options(
+    char_u *arg,            // next argument to be checked
+    syn_opt_arg_T *opt,     // various things
+    int *conceal_char,
+    int skip                // TRUE if skipping over command
 )
 {
   char_u      *gname_start, *gname;
   int syn_id;
-  int len;
+  int len = 0;
   char        *p;
   int fidx;
-  static struct flag {
+  static const struct flag {
     char    *name;
     int argtype;
     int flags;
@@ -4014,7 +4049,7 @@ get_syn_options (
                   {"cCoOnNtTaAiInNsS",        1,      0},
                   {"cCoOnNtTaAiInNeEdDiInN",  2,      0},
                   {"nNeExXtTgGrRoOuUpP",      3,      0},};
-  static char *first_letters = "cCoOkKeEtTsSgGdDfFnN";
+  static const char *const first_letters = "cCoOkKeEtTsSgGdDfFnN";
 
   if (arg == NULL)              /* already detected error */
     return NULL;
@@ -4034,9 +4069,10 @@ get_syn_options (
     for (fidx = ARRAY_SIZE(flagtab); --fidx >= 0; ) {
       p = flagtab[fidx].name;
       int i;
-      for (i = 0, len = 0; p[i] != NUL; i += 2, ++len)
+      for (i = 0, len = 0; p[i] != NUL; i += 2, ++len) {
         if (arg[len] != p[i] && arg[len] != p[i + 1])
           break;
+      }
       if (p[i] == NUL && (ascii_iswhite(arg[len])
                           || (flagtab[fidx].argtype > 0
                               ? arg[len] == '='
@@ -4058,22 +4094,21 @@ get_syn_options (
         EMSG(_("E395: contains argument not accepted here"));
         return NULL;
       }
-      if (get_id_list(&arg, 8, &opt->cont_list) == FAIL)
+      if (get_id_list(&arg, 8, &opt->cont_list, skip) == FAIL) {
         return NULL;
-    } else if (flagtab[fidx].argtype == 2)   {
-      if (get_id_list(&arg, 11, &opt->cont_in_list) == FAIL)
-        return NULL;
-    } else if (flagtab[fidx].argtype == 3)   {
-      if (get_id_list(&arg, 9, &opt->next_list) == FAIL)
-        return NULL;
-    } else if (flagtab[fidx].argtype == 11 && arg[5] == '=')   {
-      /* cchar=? */
-      if (has_mbyte) {
-        *conceal_char = mb_ptr2char(arg + 6);
-        arg += mb_ptr2len(arg + 6) - 1;
-      } else {
-        *conceal_char = arg[6];
       }
+    } else if (flagtab[fidx].argtype == 2)   {
+      if (get_id_list(&arg, 11, &opt->cont_in_list, skip) == FAIL) {
+        return NULL;
+      }
+    } else if (flagtab[fidx].argtype == 3)   {
+      if (get_id_list(&arg, 9, &opt->next_list, skip) == FAIL) {
+        return NULL;
+      }
+    } else if (flagtab[fidx].argtype == 11 && arg[5] == '=')   {
+      // cchar=?
+      *conceal_char = utf_ptr2char(arg + 6);
+      arg += mb_ptr2len(arg + 6) - 1;
       if (!vim_isprintc_strict(*conceal_char)) {
         EMSG(_("E844: invalid cchar value"));
         return NULL;
@@ -4135,8 +4170,8 @@ static void syn_incl_toplevel(int id, int *flagsp)
     return;
   *flagsp |= HL_CONTAINED;
   if (curwin->w_s->b_syn_topgrp >= SYNID_CLUSTER) {
-    /* We have to alloc this, because syn_combine_list() will free it. */
-    short *grp_list = xmalloc(2 * sizeof(short));
+    // We have to alloc this, because syn_combine_list() will free it.
+    int16_t *grp_list = xmalloc(2 * sizeof(*grp_list));
     int tlg_id = curwin->w_s->b_syn_topgrp - SYNID_CLUSTER;
 
     grp_list[0] = id;
@@ -4184,11 +4219,11 @@ static void syn_cmd_include(exarg_T *eap, int syncing)
    */
   eap->argt |= (XFILE | NOSPC);
   separate_nextcmd(eap);
-  if (*eap->arg == '<' || *eap->arg == '$' || path_is_absolute_path(eap->arg)) {
-    /* For an absolute path, "$VIM/..." or "<sfile>.." we ":source" the
-     * file.  Need to expand the file name first.  In other cases
-     * ":runtime!" is used. */
-    source = TRUE;
+  if (*eap->arg == '<' || *eap->arg == '$' || path_is_absolute(eap->arg)) {
+    // For an absolute path, "$VIM/..." or "<sfile>.." we ":source" the
+    // file.  Need to expand the file name first.  In other cases
+    // ":runtime!" is used.
+    source = true;
     if (expand_filename(eap, syn_cmdlinep, &errormsg) == FAIL) {
       if (errormsg != NULL)
         EMSG(errormsg);
@@ -4235,84 +4270,86 @@ static void syn_cmd_keyword(exarg_T *eap, int syncing)
   rest = get_group_name(arg, &group_name_end);
 
   if (rest != NULL) {
-    syn_id = syn_check_group(arg, (int)(group_name_end - arg));
-    if (syn_id != 0)
-      /* allocate a buffer, for removing backslashes in the keyword */
-      keyword_copy = xmalloc(STRLEN(rest) + 1);
-    syn_opt_arg.flags = 0;
-    syn_opt_arg.keyword = TRUE;
-    syn_opt_arg.sync_idx = NULL;
-    syn_opt_arg.has_cont_list = FALSE;
-    syn_opt_arg.cont_in_list = NULL;
-    syn_opt_arg.next_list = NULL;
-
-    /*
-     * The options given apply to ALL keywords, so all options must be
-     * found before keywords can be created.
-     * 1: collect the options and copy the keywords to keyword_copy.
-     */
-    cnt = 0;
-    p = keyword_copy;
-    for (; rest != NULL && !ends_excmd(*rest); rest = skipwhite(rest)) {
-      rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
-      if (rest == NULL || ends_excmd(*rest))
-        break;
-      /* Copy the keyword, removing backslashes, and add a NUL. */
-      while (*rest != NUL && !ascii_iswhite(*rest)) {
-        if (*rest == '\\' && rest[1] != NUL)
-          ++rest;
-        *p++ = *rest++;
-      }
-      *p++ = NUL;
-      ++cnt;
+    if (eap->skip) {
+      syn_id = -1;
+    } else {
+      syn_id = syn_check_group(arg, (int)(group_name_end - arg));
     }
+    if (syn_id != 0) {
+      // Allocate a buffer, for removing backslashes in the keyword.
+      keyword_copy = xmalloc(STRLEN(rest) + 1);
+    }
+    if (keyword_copy != NULL) {
+      syn_opt_arg.flags = 0;
+      syn_opt_arg.keyword = true;
+      syn_opt_arg.sync_idx = NULL;
+      syn_opt_arg.has_cont_list = false;
+      syn_opt_arg.cont_in_list = NULL;
+      syn_opt_arg.next_list = NULL;
 
-    if (!eap->skip) {
-      /* Adjust flags for use of ":syn include". */
-      syn_incl_toplevel(syn_id, &syn_opt_arg.flags);
-
-      /*
-       * 2: Add an entry for each keyword.
-       */
-      for (kw = keyword_copy; --cnt >= 0; kw += STRLEN(kw) + 1) {
-        for (p = vim_strchr(kw, '[');; ) {
-          if (p != NULL)
-            *p = NUL;
-          add_keyword(kw, syn_id, syn_opt_arg.flags,
-              syn_opt_arg.cont_in_list,
-              syn_opt_arg.next_list, conceal_char);
-          if (p == NULL)
-            break;
-          if (p[1] == NUL) {
-            EMSG2(_("E789: Missing ']': %s"), kw);
-            goto error;
+      // The options given apply to ALL keywords, so all options must be
+      // found before keywords can be created.
+      // 1: collect the options and copy the keywords to keyword_copy.
+      cnt = 0;
+      p = keyword_copy;
+      for (; rest != NULL && !ends_excmd(*rest); rest = skipwhite(rest)) {
+        rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
+        if (rest == NULL || ends_excmd(*rest)) {
+          break;
+        }
+        // Copy the keyword, removing backslashes, and add a NUL.
+        while (*rest != NUL && !ascii_iswhite(*rest)) {
+          if (*rest == '\\' && rest[1] != NUL) {
+            rest++;
           }
-          if (p[1] == ']') {
-            if (p[2] != NUL) {
-              EMSG3(_("E890: trailing char after ']': %s]%s"),
-                    kw, &p[2]);
+          *p++ = *rest++;
+        }
+        *p++ = NUL;
+        cnt++;
+      }
+
+      if (!eap->skip) {
+        // Adjust flags for use of ":syn include".
+        syn_incl_toplevel(syn_id, &syn_opt_arg.flags);
+
+        // 2: Add an entry for each keyword.
+        for (kw = keyword_copy; --cnt >= 0; kw += STRLEN(kw) + 1) {
+          for (p = vim_strchr(kw, '[');; ) {
+            if (p != NULL) {
+              *p = NUL;
+            }
+            add_keyword(kw, syn_id, syn_opt_arg.flags,
+                        syn_opt_arg.cont_in_list,
+                        syn_opt_arg.next_list, conceal_char);
+            if (p == NULL) {
+              break;
+            }
+            if (p[1] == NUL) {
+              emsgf(_("E789: Missing ']': %s"), kw);
               goto error;
             }
-            kw = p + 1;
-            break;   // skip over the "]"
-          }
-          if (has_mbyte) {
-            int l = (*mb_ptr2len)(p + 1);
+            if (p[1] == ']') {
+              if (p[2] != NUL) {
+                emsgf(_("E890: trailing char after ']': %s]%s"),
+                      kw, &p[2]);
+                goto error;
+              }
+              kw = p + 1;
+              break;   // skip over the "]"
+            }
+            const int l = (*mb_ptr2len)(p + 1);
 
             memmove(p, p + 1, l);
             p += l;
-          } else {
-            p[0] = p[1];
-            ++p;
           }
         }
       }
-    }
 
 error:
-    xfree(keyword_copy);
-    xfree(syn_opt_arg.cont_in_list);
-    xfree(syn_opt_arg.next_list);
+      xfree(keyword_copy);
+      xfree(syn_opt_arg.cont_in_list);
+      xfree(syn_opt_arg.next_list);
+    }
   }
 
   if (rest != NULL)
@@ -4329,8 +4366,8 @@ error:
  *
  * Also ":syntax sync match {name} [[grouphere | groupthere] {group-name}] .."
  */
-static void 
-syn_cmd_match (
+static void
+syn_cmd_match(
     exarg_T *eap,
     int syncing                        /* TRUE for ":syntax sync match .. " */
 )
@@ -4349,23 +4386,24 @@ syn_cmd_match (
 
   /* Get options before the pattern */
   syn_opt_arg.flags = 0;
-  syn_opt_arg.keyword = FALSE;
+  syn_opt_arg.keyword = false;
   syn_opt_arg.sync_idx = syncing ? &sync_idx : NULL;
-  syn_opt_arg.has_cont_list = TRUE;
+  syn_opt_arg.has_cont_list = true;
   syn_opt_arg.cont_list = NULL;
   syn_opt_arg.cont_in_list = NULL;
   syn_opt_arg.next_list = NULL;
-  rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+  rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
 
   /* get the pattern. */
   init_syn_patterns();
   memset(&item, 0, sizeof(item));
   rest = get_syn_pattern(rest, &item);
-  if (vim_regcomp_had_eol() && !(syn_opt_arg.flags & HL_EXCLUDENL))
+  if (vim_regcomp_had_eol() && !(syn_opt_arg.flags & HL_EXCLUDENL)) {
     syn_opt_arg.flags |= HL_HAS_EOL;
+  }
 
-  /* Get options after the pattern */
-  rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+  // Get options after the pattern
+  rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
 
   if (rest != NULL) {           /* all arguments are valid */
     /*
@@ -4426,8 +4464,8 @@ syn_cmd_match (
  * Handle ":syntax region {group-name} [matchgroup={group-name}]
  *		start {start} .. [skip {skip}] end {end} .. [{options}]".
  */
-static void 
-syn_cmd_region (
+static void
+syn_cmd_region(
     exarg_T *eap,
     int syncing                        /* TRUE for ":syntax sync region .." */
 )
@@ -4470,21 +4508,20 @@ syn_cmd_region (
   init_syn_patterns();
 
   syn_opt_arg.flags = 0;
-  syn_opt_arg.keyword = FALSE;
+  syn_opt_arg.keyword = false;
   syn_opt_arg.sync_idx = NULL;
-  syn_opt_arg.has_cont_list = TRUE;
+  syn_opt_arg.has_cont_list = true;
   syn_opt_arg.cont_list = NULL;
   syn_opt_arg.cont_in_list = NULL;
   syn_opt_arg.next_list = NULL;
 
-  /*
-   * get the options, patterns and matchgroup.
-   */
+  // get the options, patterns and matchgroup.
   while (rest != NULL && !ends_excmd(*rest)) {
-    /* Check for option arguments */
-    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
-    if (rest == NULL || ends_excmd(*rest))
+    // Check for option arguments
+    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
+    if (rest == NULL || ends_excmd(*rest)) {
       break;
+    }
 
     /* must be a pattern or matchgroup then */
     key_end = rest;
@@ -4492,20 +4529,21 @@ syn_cmd_region (
       ++key_end;
     xfree(key);
     key = vim_strnsave_up(rest, (int)(key_end - rest));
-    if (STRCMP(key, "MATCHGROUP") == 0)
+    if (STRCMP(key, "MATCHGROUP") == 0) {
       item = ITEM_MATCHGROUP;
-    else if (STRCMP(key, "START") == 0)
+    } else if (STRCMP(key, "START") == 0) {
       item = ITEM_START;
-    else if (STRCMP(key, "END") == 0)
+    } else if (STRCMP(key, "END") == 0) {
       item = ITEM_END;
-    else if (STRCMP(key, "SKIP") == 0) {
-      if (pat_ptrs[ITEM_SKIP] != NULL) {        /* one skip pattern allowed */
-        illegal = TRUE;
+    } else if (STRCMP(key, "SKIP") == 0) {
+      if (pat_ptrs[ITEM_SKIP] != NULL) {  // One skip pattern allowed.
+        illegal = true;
         break;
       }
       item = ITEM_SKIP;
-    } else
+    } else {
       break;
+    }
     rest = skipwhite(key_end);
     if (*rest != '=') {
       rest = NULL;
@@ -4541,21 +4579,23 @@ syn_cmd_region (
       pat_ptrs[item] = ppp;
       ppp->pp_synp = xcalloc(1, sizeof(synpat_T));
 
-      /*
-       * Get the syntax pattern and the following offset(s).
-       */
-      /* Enable the appropriate \z specials. */
-      if (item == ITEM_START)
+      // Get the syntax pattern and the following offset(s).
+
+      // Enable the appropriate \z specials.
+      if (item == ITEM_START) {
         reg_do_extmatch = REX_SET;
-      else if (item == ITEM_SKIP || item == ITEM_END)
+      } else {
+        assert(item == ITEM_SKIP || item == ITEM_END);
         reg_do_extmatch = REX_USE;
+      }
       rest = get_syn_pattern(rest, ppp->pp_synp);
       reg_do_extmatch = 0;
       if (item == ITEM_END && vim_regcomp_had_eol()
-          && !(syn_opt_arg.flags & HL_EXCLUDENL))
+          && !(syn_opt_arg.flags & HL_EXCLUDENL)) {
         ppp->pp_synp->sp_flags |= HL_HAS_EOL;
+      }
       ppp->pp_matchgroup_id = matchgroup_id;
-      ++pat_count;
+      pat_count++;
     }
   }
   xfree(key);
@@ -4648,30 +4688,25 @@ syn_cmd_region (
   }
 }
 
-/*
- * A simple syntax group ID comparison function suitable for use in qsort()
- */
-static int syn_compare_stub(const void *v1, const void *v2)
+// A simple syntax group ID comparison function suitable for use in qsort()
+static int syn_compare_stub(const void *const v1, const void *const v2)
 {
-  const short *s1 = v1;
-  const short *s2 = v2;
+  const int16_t *const s1 = v1;
+  const int16_t *const s2 = v2;
 
   return *s1 > *s2 ? 1 : *s1 < *s2 ? -1 : 0;
 }
 
-/*
- * Combines lists of syntax clusters.
- * *clstr1 and *clstr2 must both be allocated memory; they will be consumed.
- */
-static void syn_combine_list(short **clstr1, short **clstr2, int list_op)
+// Combines lists of syntax clusters.
+// *clstr1 and *clstr2 must both be allocated memory; they will be consumed.
+static void syn_combine_list(int16_t **const clstr1, int16_t **const clstr2,
+                             const int list_op)
 {
-  int count1 = 0;
-  int count2 = 0;
-  short       *g1;
-  short       *g2;
-  short       *clstr = NULL;
-  int count;
-  int round;
+  size_t count1 = 0;
+  size_t count2 = 0;
+  const int16_t *g1;
+  const int16_t *g2;
+  int16_t *clstr = NULL;
 
   /*
    * Handle degenerate cases.
@@ -4688,27 +4723,25 @@ static void syn_combine_list(short **clstr1, short **clstr2, int list_op)
     return;
   }
 
-  for (g1 = *clstr1; *g1; g1++)
-    ++count1;
-  for (g2 = *clstr2; *g2; g2++)
-    ++count2;
+  for (g1 = *clstr1; *g1; g1++) {
+    count1++;
+  }
+  for (g2 = *clstr2; *g2; g2++) {
+    count2++;
+  }
 
-  /*
-   * For speed purposes, sort both lists.
-   */
-  qsort(*clstr1, (size_t)count1, sizeof(short), syn_compare_stub);
-  qsort(*clstr2, (size_t)count2, sizeof(short), syn_compare_stub);
+  // For speed purposes, sort both lists.
+  qsort(*clstr1, count1, sizeof(**clstr1), syn_compare_stub);
+  qsort(*clstr2, count2, sizeof(**clstr2), syn_compare_stub);
 
-  /*
-   * We proceed in two passes; in round 1, we count the elements to place
-   * in the new list, and in round 2, we allocate and populate the new
-   * list.  For speed, we use a mergesort-like method, adding the smaller
-   * of the current elements in each list to the new list.
-   */
-  for (round = 1; round <= 2; round++) {
+  // We proceed in two passes; in round 1, we count the elements to place
+  // in the new list, and in round 2, we allocate and populate the new
+  // list.  For speed, we use a mergesort-like method, adding the smaller
+  // of the current elements in each list to the new list.
+  for (int round = 1; round <= 2; round++) {
     g1 = *clstr1;
     g2 = *clstr2;
-    count = 0;
+    int count = 0;
 
     /*
      * First, loop through the lists until one of them is empty.
@@ -4760,7 +4793,7 @@ static void syn_combine_list(short **clstr1, short **clstr2, int list_op)
         clstr = NULL;
         break;
       }
-      clstr = xmalloc((count + 1) * sizeof(short));
+      clstr = xmalloc((count + 1) * sizeof(*clstr));
       clstr[count] = 0;
     }
   }
@@ -4773,10 +4806,8 @@ static void syn_combine_list(short **clstr1, short **clstr2, int list_op)
   *clstr1 = clstr;
 }
 
-/*
- * Lookup a syntax cluster name and return it's ID.
- * If it is not found, 0 is returned.
- */
+// Lookup a syntax cluster name and return its ID.
+// If it is not found, 0 is returned.
 static int syn_scl_name2id(char_u *name)
 {
   // Avoid using stricmp() too much, it's slow on some systems
@@ -4804,12 +4835,10 @@ static int syn_scl_namen2id(char_u *linep, int len)
   return id;
 }
 
-/*
- * Find syntax cluster name in the table and return it's ID.
- * The argument is a pointer to the name and the length of the name.
- * If it doesn't exist yet, a new entry is created.
- * Return 0 for failure.
- */
+// Find syntax cluster name in the table and return its ID.
+// The argument is a pointer to the name and the length of the name.
+// If it doesn't exist yet, a new entry is created.
+// Return 0 for failure.
 static int syn_check_cluster(char_u *pp, int len)
 {
   int id;
@@ -4825,11 +4854,9 @@ static int syn_check_cluster(char_u *pp, int len)
   return id;
 }
 
-/*
- * Add new syntax cluster and return it's ID.
- * "name" must be an allocated string, it will be consumed.
- * Return 0 for failure.
- */
+// Add new syntax cluster and return its ID.
+// "name" must be an allocated string, it will be consumed.
+// Return 0 for failure.
 static int syn_add_cluster(char_u *name)
 {
   /*
@@ -4871,9 +4898,7 @@ static void syn_cmd_cluster(exarg_T *eap, int syncing)
   char_u      *arg = eap->arg;
   char_u      *group_name_end;
   char_u      *rest;
-  int scl_id;
-  short       *clstr_list;
-  int got_clstr = FALSE;
+  bool got_clstr = false;
   int opt_len;
   int list_op;
 
@@ -4884,9 +4909,10 @@ static void syn_cmd_cluster(exarg_T *eap, int syncing)
   rest = get_group_name(arg, &group_name_end);
 
   if (rest != NULL) {
-    scl_id = syn_check_cluster(arg, (int)(group_name_end - arg));
-    if (scl_id == 0)
+    int scl_id = syn_check_cluster(arg, (int)(group_name_end - arg));
+    if (scl_id == 0) {
       return;
+    }
     scl_id -= SYNID_CLUSTER;
 
     for (;; ) {
@@ -4905,14 +4931,18 @@ static void syn_cmd_cluster(exarg_T *eap, int syncing)
       } else
         break;
 
-      clstr_list = NULL;
-      if (get_id_list(&rest, opt_len, &clstr_list) == FAIL) {
+      int16_t *clstr_list = NULL;
+      if (get_id_list(&rest, opt_len, &clstr_list, eap->skip) == FAIL) {
         EMSG2(_(e_invarg2), rest);
         break;
       }
-      syn_combine_list(&SYN_CLSTR(curwin->w_s)[scl_id].scl_list,
-          &clstr_list, list_op);
-      got_clstr = TRUE;
+      if (scl_id >= 0) {
+        syn_combine_list(&SYN_CLSTR(curwin->w_s)[scl_id].scl_list,
+                         &clstr_list, list_op);
+      } else {
+        xfree(clstr_list);
+      }
+      got_clstr = true;
     }
 
     if (got_clstr) {
@@ -5157,36 +5187,30 @@ static void syn_cmd_sync(exarg_T *eap, int syncing)
  * Careful: the argument is modified (NULs added).
  * returns FAIL for some error, OK for success.
  */
-static int 
-get_id_list (
-    char_u **arg,
-    int keylen,                     /* length of keyword */
-    short **list             /* where to store the resulting list, if not
-                                   NULL, the list is silently skipped! */
+static int
+get_id_list(
+    char_u **const arg,
+    const int keylen,       // length of keyword
+    int16_t **const list,   // where to store the resulting list, if not
+                            // NULL, the list is silently skipped!
+    const bool skip
 )
 {
   char_u      *p = NULL;
   char_u      *end;
-  int round;
-  int count;
   int total_count = 0;
-  short       *retval = NULL;
-  char_u      *name;
+  int16_t *retval = NULL;
   regmatch_T regmatch;
   int id;
-  int failed = FALSE;
+  bool failed = false;
 
-  /*
-   * We parse the list twice:
-   * round == 1: count the number of items, allocate the array.
-   * round == 2: fill the array with the items.
-   * In round 1 new groups may be added, causing the number of items to
-   * grow when a regexp is used.  In that case round 1 is done once again.
-   */
-  for (round = 1; round <= 2; ++round) {
-    /*
-     * skip "contains"
-     */
+  // We parse the list twice:
+  // round == 1: count the number of items, allocate the array.
+  // round == 2: fill the array with the items.
+  // In round 1 new groups may be added, causing the number of items to
+  // grow when a regexp is used.  In that case round 1 is done once again.
+  for (int round = 1; round <= 2; round++) {
+    // skip "contains"
     p = skipwhite(*arg + keylen);
     if (*p != '=') {
       EMSG2(_("E405: Missing equal sign: %s"), *arg);
@@ -5198,14 +5222,12 @@ get_id_list (
       break;
     }
 
-    /*
-     * parse the arguments after "contains"
-     */
-    count = 0;
+    // parse the arguments after "contains"
+    int count = 0;
     do {
-      for (end = p; *end && !ascii_iswhite(*end) && *end != ','; ++end)
-        ;
-      name = xmalloc((int)(end - p + 3));             /* leave room for "^$" */
+      for (end = p; *end && !ascii_iswhite(*end) && *end != ','; end++) {
+      }
+      char_u *const name = xmalloc((int)(end - p + 3));   // leave room for "^$"
       STRLCPY(name + 1, p, end - p + 1);
       if (       STRCMP(name + 1, "ALLBUT") == 0
                  || STRCMP(name + 1, "ALL") == 0
@@ -5213,13 +5235,14 @@ get_id_list (
                  || STRCMP(name + 1, "CONTAINED") == 0) {
         if (TOUPPER_ASC(**arg) != 'C') {
           EMSG2(_("E407: %s not allowed here"), name + 1);
-          failed = TRUE;
+          failed = true;
           xfree(name);
           break;
         }
         if (count != 0) {
-          EMSG2(_("E408: %s must be first in contains list"), name + 1);
-          failed = TRUE;
+          EMSG2(_("E408: %s must be first in contains list"),
+                name + 1);
+          failed = true;
           xfree(name);
           break;
         }
@@ -5231,22 +5254,24 @@ get_id_list (
           id = SYNID_CONTAINED;
         id += current_syn_inc_tag;
       } else if (name[1] == '@')   {
-        id = syn_check_cluster(name + 2, (int)(end - p - 1));
+        if (skip) {
+          id = -1;
+        } else {
+          id = syn_check_cluster(name + 2, (int)(end - p - 1));
+        }
       } else {
         /*
          * Handle full group name.
          */
-        if (vim_strpbrk(name + 1, (char_u *)"\\.*^$~[") == NULL)
+        if (vim_strpbrk(name + 1, (char_u *)"\\.*^$~[") == NULL) {
           id = syn_check_group(name + 1, (int)(end - p));
-        else {
-          /*
-           * Handle match of regexp with group names.
-           */
+        } else {
+          // Handle match of regexp with group names.
           *name = '^';
           STRCAT(name, "$");
           regmatch.regprog = vim_regcomp(name, RE_MAGIC);
           if (regmatch.regprog == NULL) {
-            failed = TRUE;
+            failed = true;
             xfree(name);
             break;
           }
@@ -5256,18 +5281,19 @@ get_id_list (
           for (int i = highlight_ga.ga_len; --i >= 0; ) {
             if (vim_regexec(&regmatch, HL_TABLE()[i].sg_name, (colnr_T)0)) {
               if (round == 2) {
-                /* Got more items than expected; can happen
-                 * when adding items that match:
-                 * "contains=a.*b,axb".
-                 * Go back to first round */
+                // Got more items than expected; can happen
+                // when adding items that match:
+                // "contains=a.*b,axb".
+                // Go back to first round.
                 if (count >= total_count) {
                   xfree(retval);
                   round = 1;
-                } else
-                  retval[count] = i + 1;
+                } else {
+                  retval[count] = i + 1;  // -V522
+                }
               }
-              ++count;
-              id = -1;                      /* remember that we found one */
+              count++;
+              id = -1;  // Remember that we found one.
             }
           }
           vim_regfree(regmatch.regprog);
@@ -5276,17 +5302,18 @@ get_id_list (
       xfree(name);
       if (id == 0) {
         EMSG2(_("E409: Unknown group name: %s"), p);
-        failed = TRUE;
+        failed = true;
         break;
       }
       if (id > 0) {
         if (round == 2) {
-          /* Got more items than expected, go back to first round */
+          // Got more items than expected, go back to first round.
           if (count >= total_count) {
             xfree(retval);
             round = 1;
-          } else
+          } else {
             retval[count] = id;
+          }
         }
         ++count;
       }
@@ -5298,8 +5325,8 @@ get_id_list (
     if (failed)
       break;
     if (round == 1) {
-      retval = xmalloc((count + 1) * sizeof(short));
-      retval[count] = 0;            /* zero means end of the list */
+      retval = xmalloc((count + 1) * sizeof(*retval));
+      retval[count] = 0;            // zero means end of the list
       total_count = count;
     }
   }
@@ -5321,20 +5348,18 @@ get_id_list (
 /*
  * Make a copy of an ID list.
  */
-static short *copy_id_list(short *list)
+static int16_t *copy_id_list(const int16_t *const list)
 {
-  int len;
-  int count;
-  short   *retval;
-
-  if (list == NULL)
+  if (list == NULL) {
     return NULL;
+  }
 
-  for (count = 0; list[count]; ++count)
-    ;
-  len = (count + 1) * sizeof(short);
-  retval = xmalloc(len);
-  memmove(retval, list, (size_t)len);
+  int count;
+  for (count = 0; list[count]; count++) {
+  }
+  const size_t len = (count + 1) * sizeof(int16_t);
+  int16_t *const retval = xmalloc(len);
+  memmove(retval, list, len);
 
   return retval;
 }
@@ -5346,18 +5371,18 @@ static short *copy_id_list(short *list)
  * the current item.
  * This function is called very often, keep it fast!!
  */
-static int 
-in_id_list (
-    stateitem_T *cur_si,            /* current item or NULL */
-    short *list,              /* id list */
-    struct sp_syn *ssp,             /* group id and ":syn include" tag of group */
-    int contained                  /* group id is contained */
+static int
+in_id_list(
+    stateitem_T *cur_si,    // current item or NULL
+    int16_t *list,          // id list
+    struct sp_syn *ssp,     // group id and ":syn include" tag of group
+    int contained           // group id is contained
 )
 {
   int retval;
-  short       *scl_list;
-  short item;
-  short id = ssp->id;
+  int16_t *scl_list;
+  int16_t item;
+  int16_t id = ssp->id;
   static int depth = 0;
   int r;
 
@@ -5516,24 +5541,26 @@ void ex_ownsyntax(exarg_T *eap)
     clear_string_option(&curwin->w_s->b_syn_isk);
   }
 
-  /* save value of b:current_syntax */
-  old_value = get_var_value((char_u *)"b:current_syntax");
-  if (old_value != NULL)
+  // Save value of b:current_syntax.
+  old_value = get_var_value("b:current_syntax");
+  if (old_value != NULL) {
     old_value = vim_strsave(old_value);
+  }
 
   /* Apply the "syntax" autocommand event, this finds and loads the syntax
    * file. */
   apply_autocmds(EVENT_SYNTAX, eap->arg, curbuf->b_fname, TRUE, curbuf);
 
-  /* move value of b:current_syntax to w:current_syntax */
-  new_value = get_var_value((char_u *)"b:current_syntax");
-  if (new_value != NULL)
+  // Move value of b:current_syntax to w:current_syntax.
+  new_value = get_var_value("b:current_syntax");
+  if (new_value != NULL) {
     set_internal_string_var((char_u *)"w:current_syntax", new_value);
+  }
 
-  /* restore value of b:current_syntax */
-  if (old_value == NULL)
-    do_unlet((char_u *)"b:current_syntax", TRUE);
-  else {
+  // Restore value of b:current_syntax.
+  if (old_value == NULL) {
+    do_unlet(S_LEN("b:current_syntax"), true);
+  } else {
     set_internal_string_var((char_u *)"b:current_syntax", old_value);
     xfree(old_value);
   }
@@ -5549,8 +5576,10 @@ bool syntax_present(win_T *win)
 
 
 static enum {
-  EXP_SUBCMD,       /* expand ":syn" sub-commands */
-  EXP_CASE          /* expand ":syn case" arguments */
+  EXP_SUBCMD,       // expand ":syn" sub-commands
+  EXP_CASE,         // expand ":syn case" arguments
+  EXP_SPELL,        // expand ":syn spell" arguments
+  EXP_SYNC          // expand ":syn sync" arguments
 } expand_what;
 
 /*
@@ -5566,48 +5595,49 @@ void reset_expand_highlight(void)
  * Handle command line completion for :match and :echohl command: Add "None"
  * as highlight group.
  */
-void set_context_in_echohl_cmd(expand_T *xp, char_u *arg)
+void set_context_in_echohl_cmd(expand_T *xp, const char *arg)
 {
   xp->xp_context = EXPAND_HIGHLIGHT;
-  xp->xp_pattern = arg;
+  xp->xp_pattern = (char_u *)arg;
   include_none = 1;
 }
 
 /*
  * Handle command line completion for :syntax command.
  */
-void set_context_in_syntax_cmd(expand_T *xp, char_u *arg)
+void set_context_in_syntax_cmd(expand_T *xp, const char *arg)
 {
-  char_u      *p;
-
-  /* Default: expand subcommands */
+  // Default: expand subcommands.
   xp->xp_context = EXPAND_SYNTAX;
   expand_what = EXP_SUBCMD;
-  xp->xp_pattern = arg;
+  xp->xp_pattern = (char_u *)arg;
   include_link = 0;
   include_default = 0;
 
   /* (part of) subcommand already typed */
   if (*arg != NUL) {
-    p = skiptowhite(arg);
-    if (*p != NUL) {                /* past first word */
-      xp->xp_pattern = skipwhite(p);
-      if (*skiptowhite(xp->xp_pattern) != NUL)
+    const char *p = (const char *)skiptowhite((const char_u *)arg);
+    if (*p != NUL) {  // Past first word.
+      xp->xp_pattern = skipwhite((const char_u *)p);
+      if (*skiptowhite(xp->xp_pattern) != NUL) {
         xp->xp_context = EXPAND_NOTHING;
-      else if (STRNICMP(arg, "case", p - arg) == 0)
+      } else if (STRNICMP(arg, "case", p - arg) == 0) {
         expand_what = EXP_CASE;
-      else if (  STRNICMP(arg, "keyword", p - arg) == 0
+      } else if (STRNICMP(arg, "spell", p - arg) == 0) {
+        expand_what = EXP_SPELL;
+      } else if (STRNICMP(arg, "sync", p - arg) == 0) {
+        expand_what = EXP_SYNC;
+      } else if (STRNICMP(arg, "keyword", p - arg) == 0
                  || STRNICMP(arg, "region", p - arg) == 0
                  || STRNICMP(arg, "match", p - arg) == 0
-                 || STRNICMP(arg, "list", p - arg) == 0)
+                 || STRNICMP(arg, "list", p - arg) == 0) {
         xp->xp_context = EXPAND_HIGHLIGHT;
-      else
+      } else {
         xp->xp_context = EXPAND_NOTHING;
+      }
     }
   }
 }
-
-static char *(case_args[]) = {"match", "ignore", NULL};
 
 /*
  * Function given to ExpandGeneric() to obtain the list syntax names for
@@ -5615,9 +5645,27 @@ static char *(case_args[]) = {"match", "ignore", NULL};
  */
 char_u *get_syntax_name(expand_T *xp, int idx)
 {
-  if (expand_what == EXP_SUBCMD)
-    return (char_u *)subcommands[idx].name;
-  return (char_u *)case_args[idx];
+  switch (expand_what) {
+    case EXP_SUBCMD:
+        return (char_u *)subcommands[idx].name;
+    case EXP_CASE: {
+        static char *case_args[] = { "match", "ignore", NULL };
+        return (char_u *)case_args[idx];
+    }
+    case EXP_SPELL: {
+        static char *spell_args[] =
+        { "toplevel", "notoplevel", "default", NULL };
+        return (char_u *)spell_args[idx];
+    }
+    case EXP_SYNC: {
+        static char *sync_args[] =
+        { "ccomment", "clear", "fromstart",
+         "linebreaks=", "linecont", "lines=", "match",
+         "maxlines=", "minlines=", "region", NULL };
+        return (char_u *)sync_args[idx];
+    }
+  }
+  return NULL;
 }
 
 
@@ -5633,13 +5681,9 @@ int syn_get_id(
 {
   // When the position is not after the current position and in the same
   // line of the same buffer, need to restart parsing.
-  if (wp->w_buffer != syn_buf
-      || lnum != current_lnum
-      || col < current_col) {
+  if (wp->w_buffer != syn_buf || lnum != current_lnum || col < current_col) {
     syntax_start(wp, lnum);
-  } else if (wp->w_buffer == syn_buf
-             && lnum == current_lnum
-             && col > current_col) {
+  } else if (col > current_col) {
       // next_match may not be correct when moving around, e.g. with the
       // "skip" expression in searchpair()
       next_match_idx = -1;
@@ -5828,9 +5872,12 @@ static void syntime_report(void)
     }
   }
 
-  /* sort on total time */
-  qsort(ga.ga_data, (size_t)ga.ga_len, sizeof(time_entry_T),
-      syn_compare_syntime);
+  // Sort on total time. Skip if there are no items to avoid passing NULL
+  // pointer to qsort().
+  if (ga.ga_len > 1) {
+    qsort(ga.ga_data, (size_t)ga.ga_len, sizeof(time_entry_T),
+          syn_compare_syntime);
+  }
 
   MSG_PUTS_TITLE(_(
           "  TOTAL      COUNT  MATCH   SLOWEST     AVERAGE   NAME               PATTERN"));
@@ -5886,9 +5933,11 @@ static void syntime_report(void)
 //
 // When making changes here, also change runtime/colors/default.vim!
 
-static char *highlight_init_both[] =
-{
-  "Conceal      ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey",
+static const char *highlight_init_both[] = {
+  "Conceal "
+      "ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey",
+  "Cursor       guibg=fg guifg=bg",
+  "lCursor      guibg=fg guifg=bg",
   "DiffText     cterm=bold ctermbg=Red gui=bold guibg=Red",
   "ErrorMsg     ctermbg=DarkRed ctermfg=White guibg=Red guifg=White",
   "IncSearch    cterm=reverse gui=reverse",
@@ -5905,11 +5954,12 @@ static char *highlight_init_both[] =
   "default link EndOfBuffer NonText",
   "default link QuickFixLine Search",
   "default link Substitute Search",
+  "default link Whitespace NonText",
+  "default link MsgSeparator StatusLine",
   NULL
 };
 
-static char *highlight_init_light[] =
-{
+static const char *highlight_init_light[] = {
   "ColorColumn  ctermbg=LightRed guibg=LightRed",
   "CursorColumn ctermbg=LightGrey guibg=Grey90",
   "CursorLine   cterm=underline guibg=Grey90",
@@ -5938,11 +5988,11 @@ static char *highlight_init_light[] =
   "Title        ctermfg=DarkMagenta gui=bold guifg=Magenta",
   "Visual       guibg=LightGrey",
   "WarningMsg   ctermfg=DarkRed guifg=Red",
+  "Normal       gui=NONE",
   NULL
 };
 
-static char *highlight_init_dark[] =
-{
+static const char *highlight_init_dark[] = {
   "ColorColumn  ctermbg=DarkRed guibg=DarkRed",
   "CursorColumn ctermbg=DarkGrey guibg=Grey40",
   "CursorLine   cterm=underline guibg=Grey40",
@@ -5971,24 +6021,231 @@ static char *highlight_init_dark[] =
   "Title        ctermfg=LightMagenta gui=bold guifg=Magenta",
   "Visual       guibg=DarkGrey",
   "WarningMsg   ctermfg=LightRed guifg=Red",
+  "Normal       gui=NONE",
   NULL
 };
 
-void 
-init_highlight (
-    int both,                   /* include groups where 'bg' doesn't matter */
-    int reset                  /* clear group first */
-)
-{
-  int i;
-  char        **pp;
-  static int had_both = FALSE;
+const char *const highlight_init_cmdline[] = {
+  // XXX When modifying a list modify it in both valid and invalid halfs.
+  // TODO(ZyX-I): merge valid and invalid groups via a macros.
 
-  /*
-   * Try finding the color scheme file.  Used when a color file was loaded
-   * and 'background' or 't_Co' is changed.
-   */
-  char_u *p = get_var_value((char_u *)"g:colors_name");
+  // NvimInternalError should appear only when highlighter has a bug.
+  "NvimInternalError ctermfg=Red ctermbg=Red guifg=Red guibg=Red",
+
+  // Highlight groups (links) used by parser:
+
+  "default link NvimAssignment Operator",
+  "default link NvimPlainAssignment NvimAssignment",
+  "default link NvimAugmentedAssignment NvimAssignment",
+  "default link NvimAssignmentWithAddition NvimAugmentedAssignment",
+  "default link NvimAssignmentWithSubtraction NvimAugmentedAssignment",
+  "default link NvimAssignmentWithConcatenation NvimAugmentedAssignment",
+
+  "default link NvimOperator Operator",
+
+  "default link NvimUnaryOperator NvimOperator",
+  "default link NvimUnaryPlus NvimUnaryOperator",
+  "default link NvimUnaryMinus NvimUnaryOperator",
+  "default link NvimNot NvimUnaryOperator",
+
+  "default link NvimBinaryOperator NvimOperator",
+  "default link NvimComparison NvimBinaryOperator",
+  "default link NvimComparisonModifier NvimComparison",
+  "default link NvimBinaryPlus NvimBinaryOperator",
+  "default link NvimBinaryMinus NvimBinaryOperator",
+  "default link NvimConcat NvimBinaryOperator",
+  "default link NvimConcatOrSubscript NvimConcat",
+  "default link NvimOr NvimBinaryOperator",
+  "default link NvimAnd NvimBinaryOperator",
+  "default link NvimMultiplication NvimBinaryOperator",
+  "default link NvimDivision NvimBinaryOperator",
+  "default link NvimMod NvimBinaryOperator",
+
+  "default link NvimTernary NvimOperator",
+  "default link NvimTernaryColon NvimTernary",
+
+  "default link NvimParenthesis Delimiter",
+  "default link NvimLambda NvimParenthesis",
+  "default link NvimNestingParenthesis NvimParenthesis",
+  "default link NvimCallingParenthesis NvimParenthesis",
+
+  "default link NvimSubscript NvimParenthesis",
+  "default link NvimSubscriptBracket NvimSubscript",
+  "default link NvimSubscriptColon NvimSubscript",
+  "default link NvimCurly NvimSubscript",
+
+  "default link NvimContainer NvimParenthesis",
+  "default link NvimDict NvimContainer",
+  "default link NvimList NvimContainer",
+
+  "default link NvimIdentifier Identifier",
+  "default link NvimIdentifierScope NvimIdentifier",
+  "default link NvimIdentifierScopeDelimiter NvimIdentifier",
+  "default link NvimIdentifierName NvimIdentifier",
+  "default link NvimIdentifierKey NvimIdentifier",
+
+  "default link NvimColon Delimiter",
+  "default link NvimComma Delimiter",
+  "default link NvimArrow Delimiter",
+
+  "default link NvimRegister SpecialChar",
+  "default link NvimNumber Number",
+  "default link NvimFloat NvimNumber",
+  "default link NvimNumberPrefix Type",
+
+  "default link NvimOptionSigil Type",
+  "default link NvimOptionName NvimIdentifier",
+  "default link NvimOptionScope NvimIdentifierScope",
+  "default link NvimOptionScopeDelimiter NvimIdentifierScopeDelimiter",
+
+  "default link NvimEnvironmentSigil NvimOptionSigil",
+  "default link NvimEnvironmentName NvimIdentifier",
+
+  "default link NvimString String",
+  "default link NvimStringBody NvimString",
+  "default link NvimStringQuote NvimString",
+  "default link NvimStringSpecial SpecialChar",
+
+  "default link NvimSingleQuote NvimStringQuote",
+  "default link NvimSingleQuotedBody NvimStringBody",
+  "default link NvimSingleQuotedQuote NvimStringSpecial",
+
+  "default link NvimDoubleQuote NvimStringQuote",
+  "default link NvimDoubleQuotedBody NvimStringBody",
+  "default link NvimDoubleQuotedEscape NvimStringSpecial",
+
+  "default link NvimFigureBrace NvimInternalError",
+  "default link NvimSingleQuotedUnknownEscape NvimInternalError",
+
+  "default link NvimSpacing Normal",
+
+  // NvimInvalid groups:
+
+  "default link NvimInvalidSingleQuotedUnknownEscape NvimInternalError",
+
+  "default link NvimInvalid Error",
+
+  "default link NvimInvalidAssignment NvimInvalid",
+  "default link NvimInvalidPlainAssignment NvimInvalidAssignment",
+  "default link NvimInvalidAugmentedAssignment NvimInvalidAssignment",
+  "default link NvimInvalidAssignmentWithAddition "
+      "NvimInvalidAugmentedAssignment",
+  "default link NvimInvalidAssignmentWithSubtraction "
+      "NvimInvalidAugmentedAssignment",
+  "default link NvimInvalidAssignmentWithConcatenation "
+      "NvimInvalidAugmentedAssignment",
+
+  "default link NvimInvalidOperator NvimInvalid",
+
+  "default link NvimInvalidUnaryOperator NvimInvalidOperator",
+  "default link NvimInvalidUnaryPlus NvimInvalidUnaryOperator",
+  "default link NvimInvalidUnaryMinus NvimInvalidUnaryOperator",
+  "default link NvimInvalidNot NvimInvalidUnaryOperator",
+
+  "default link NvimInvalidBinaryOperator NvimInvalidOperator",
+  "default link NvimInvalidComparison NvimInvalidBinaryOperator",
+  "default link NvimInvalidComparisonModifier NvimInvalidComparison",
+  "default link NvimInvalidBinaryPlus NvimInvalidBinaryOperator",
+  "default link NvimInvalidBinaryMinus NvimInvalidBinaryOperator",
+  "default link NvimInvalidConcat NvimInvalidBinaryOperator",
+  "default link NvimInvalidConcatOrSubscript NvimInvalidConcat",
+  "default link NvimInvalidOr NvimInvalidBinaryOperator",
+  "default link NvimInvalidAnd NvimInvalidBinaryOperator",
+  "default link NvimInvalidMultiplication NvimInvalidBinaryOperator",
+  "default link NvimInvalidDivision NvimInvalidBinaryOperator",
+  "default link NvimInvalidMod NvimInvalidBinaryOperator",
+
+  "default link NvimInvalidTernary NvimInvalidOperator",
+  "default link NvimInvalidTernaryColon NvimInvalidTernary",
+
+  "default link NvimInvalidDelimiter NvimInvalid",
+
+  "default link NvimInvalidParenthesis NvimInvalidDelimiter",
+  "default link NvimInvalidLambda NvimInvalidParenthesis",
+  "default link NvimInvalidNestingParenthesis NvimInvalidParenthesis",
+  "default link NvimInvalidCallingParenthesis NvimInvalidParenthesis",
+
+  "default link NvimInvalidSubscript NvimInvalidParenthesis",
+  "default link NvimInvalidSubscriptBracket NvimInvalidSubscript",
+  "default link NvimInvalidSubscriptColon NvimInvalidSubscript",
+  "default link NvimInvalidCurly NvimInvalidSubscript",
+
+  "default link NvimInvalidContainer NvimInvalidParenthesis",
+  "default link NvimInvalidDict NvimInvalidContainer",
+  "default link NvimInvalidList NvimInvalidContainer",
+
+  "default link NvimInvalidValue NvimInvalid",
+
+  "default link NvimInvalidIdentifier NvimInvalidValue",
+  "default link NvimInvalidIdentifierScope NvimInvalidIdentifier",
+  "default link NvimInvalidIdentifierScopeDelimiter NvimInvalidIdentifier",
+  "default link NvimInvalidIdentifierName NvimInvalidIdentifier",
+  "default link NvimInvalidIdentifierKey NvimInvalidIdentifier",
+
+  "default link NvimInvalidColon NvimInvalidDelimiter",
+  "default link NvimInvalidComma NvimInvalidDelimiter",
+  "default link NvimInvalidArrow NvimInvalidDelimiter",
+
+  "default link NvimInvalidRegister NvimInvalidValue",
+  "default link NvimInvalidNumber NvimInvalidValue",
+  "default link NvimInvalidFloat NvimInvalidNumber",
+  "default link NvimInvalidNumberPrefix NvimInvalidNumber",
+
+  "default link NvimInvalidOptionSigil NvimInvalidIdentifier",
+  "default link NvimInvalidOptionName NvimInvalidIdentifier",
+  "default link NvimInvalidOptionScope NvimInvalidIdentifierScope",
+  "default link NvimInvalidOptionScopeDelimiter "
+      "NvimInvalidIdentifierScopeDelimiter",
+
+  "default link NvimInvalidEnvironmentSigil NvimInvalidOptionSigil",
+  "default link NvimInvalidEnvironmentName NvimInvalidIdentifier",
+
+  // Invalid string bodies and specials are still highlighted as valid ones to
+  // minimize the red area.
+  "default link NvimInvalidString NvimInvalidValue",
+  "default link NvimInvalidStringBody NvimStringBody",
+  "default link NvimInvalidStringQuote NvimInvalidString",
+  "default link NvimInvalidStringSpecial NvimStringSpecial",
+
+  "default link NvimInvalidSingleQuote NvimInvalidStringQuote",
+  "default link NvimInvalidSingleQuotedBody NvimInvalidStringBody",
+  "default link NvimInvalidSingleQuotedQuote NvimInvalidStringSpecial",
+
+  "default link NvimInvalidDoubleQuote NvimInvalidStringQuote",
+  "default link NvimInvalidDoubleQuotedBody NvimInvalidStringBody",
+  "default link NvimInvalidDoubleQuotedEscape NvimInvalidStringSpecial",
+  "default link NvimInvalidDoubleQuotedUnknownEscape NvimInvalidValue",
+
+  "default link NvimInvalidFigureBrace NvimInvalidDelimiter",
+
+  "default link NvimInvalidSpacing ErrorMsg",
+
+  // Not actually invalid, but we highlight user that he is doing something
+  // wrong.
+  "default link NvimDoubleQuotedUnknownEscape NvimInvalidValue",
+  NULL,
+};
+
+/// Create default links for Nvim* highlight groups used for cmdline coloring
+void syn_init_cmdline_highlight(bool reset, bool init)
+{
+  for (size_t i = 0 ; highlight_init_cmdline[i] != NULL ; i++) {
+    do_highlight(highlight_init_cmdline[i], reset, init);
+  }
+}
+
+/// Load colors from a file if "g:colors_name" is set, otherwise load builtin
+/// colors
+///
+/// @param both include groups where 'bg' doesn't matter
+/// @param reset clear groups first
+void init_highlight(bool both, bool reset)
+{
+  static int had_both = false;
+
+  // Try finding the color scheme file.  Used when a color file was loaded
+  // and 'background' or 't_Co' is changed.
+  char_u *p = get_var_value("g:colors_name");
   if (p != NULL) {
     // Value of g:colors_name could be freed in load_colors() and make
     // p invalid, so copy it.
@@ -6004,45 +6261,46 @@ init_highlight (
    * Didn't use a color file, use the compiled-in colors.
    */
   if (both) {
-    had_both = TRUE;
-    pp = highlight_init_both;
-    for (i = 0; pp[i] != NULL; ++i)
-      do_highlight((char_u *)pp[i], reset, TRUE);
-  } else if (!had_both)
-    /* Don't do anything before the call with both == TRUE from main().
-     * Not everything has been setup then, and that call will overrule
-     * everything anyway. */
+    had_both = true;
+    const char *const *const pp = highlight_init_both;
+    for (size_t i = 0; pp[i] != NULL; i++) {
+      do_highlight(pp[i], reset, true);
+    }
+  } else if (!had_both) {
+    // Don't do anything before the call with both == TRUE from main().
+    // Not everything has been setup then, and that call will overrule
+    // everything anyway.
     return;
+  }
 
-  if (*p_bg == 'l')
-    pp = highlight_init_light;
-  else
-    pp = highlight_init_dark;
-  for (i = 0; pp[i] != NULL; ++i)
-    do_highlight((char_u *)pp[i], reset, TRUE);
+  const char *const *const pp = ((*p_bg == 'l')
+                                 ? highlight_init_light
+                                 : highlight_init_dark);
+  for (size_t i = 0; pp[i] != NULL; i++) {
+    do_highlight(pp[i], reset, true);
+  }
 
   /* Reverse looks ugly, but grey may not work for 8 colors.  Thus let it
    * depend on the number of colors available.
    * With 8 colors brown is equal to yellow, need to use black for Search fg
    * to avoid Statement highlighted text disappears.
    * Clear the attributes, needed when changing the t_Co value. */
-  if (t_colors > 8)
+  if (t_colors > 8) {
     do_highlight(
-        (char_u *)(*p_bg == 'l'
-                   ? "Visual cterm=NONE ctermbg=LightGrey"
-                   : "Visual cterm=NONE ctermbg=DarkGrey"), FALSE,
-        TRUE);
-  else {
-    do_highlight((char_u *)"Visual cterm=reverse ctermbg=NONE",
-        FALSE, TRUE);
-    if (*p_bg == 'l')
-      do_highlight((char_u *)"Search ctermfg=black", FALSE, TRUE);
+        (*p_bg == 'l'
+         ? "Visual cterm=NONE ctermbg=LightGrey"
+         : "Visual cterm=NONE ctermbg=DarkGrey"), false, true);
+  } else {
+    do_highlight("Visual cterm=reverse ctermbg=NONE", false, true);
+    if (*p_bg == 'l') {
+      do_highlight("Search ctermfg=black", false, true);
+    }
   }
 
   /*
    * If syntax highlighting is enabled load the highlighting for it.
    */
-  if (get_var_value((char_u *)"g:syntax_on") != NULL) {
+  if (get_var_value("g:syntax_on") != NULL) {
     static int recursive = 0;
 
     if (recursive >= 5) {
@@ -6053,6 +6311,7 @@ init_highlight (
       recursive--;
     }
   }
+  syn_init_cmdline_highlight(false, false);
 }
 
 /*
@@ -6075,201 +6334,285 @@ int load_colors(char_u *name)
   recursive = true;
   size_t buflen = STRLEN(name) + 12;
   buf = xmalloc(buflen);
+  apply_autocmds(EVENT_COLORSCHEMEPRE, name, curbuf->b_fname, false, curbuf);
   snprintf((char *)buf, buflen, "colors/%s.vim", name);
   retval = source_runtime(buf, DIP_START + DIP_OPT);
   xfree(buf);
   apply_autocmds(EVENT_COLORSCHEME, name, curbuf->b_fname, FALSE, curbuf);
 
   recursive = false;
-  ui_refresh();
 
   return retval;
 }
 
-/*
- * Handle the ":highlight .." command.
- * When using ":hi clear" this is called recursively for each group with
- * "forceit" and "init" both TRUE.
- */
-void 
-do_highlight (
-    char_u *line,
-    int forceit,
-    int init                   /* TRUE when called for initializing */
-)
+static char *(color_names[28]) = {
+  "Black", "DarkBlue", "DarkGreen", "DarkCyan",
+  "DarkRed", "DarkMagenta", "Brown", "DarkYellow",
+  "Gray", "Grey", "LightGray", "LightGrey",
+  "DarkGray", "DarkGrey",
+  "Blue", "LightBlue", "Green", "LightGreen",
+  "Cyan", "LightCyan", "Red", "LightRed", "Magenta",
+  "LightMagenta", "Yellow", "LightYellow", "White", "NONE" };
+  // indices:
+  // 0, 1, 2, 3,
+  // 4, 5, 6, 7,
+  // 8, 9, 10, 11,
+  // 12, 13,
+  // 14, 15, 16, 17,
+  // 18, 19, 20, 21, 22,
+  // 23, 24, 25, 26, 27
+static int color_numbers_16[28] = { 0, 1, 2, 3,
+  4, 5, 6, 6,
+  7, 7, 7, 7,
+  8, 8,
+  9, 9, 10, 10,
+  11, 11, 12, 12, 13,
+  13, 14, 14, 15, -1 };
+// for xterm with 88 colors...
+static int color_numbers_88[28] = { 0, 4, 2, 6,
+  1, 5, 32, 72,
+  84, 84, 7, 7,
+  82, 82,
+  12, 43, 10, 61,
+  14, 63, 9, 74, 13,
+  75, 11, 78, 15, -1 };
+// for xterm with 256 colors...
+static int color_numbers_256[28] = { 0, 4, 2, 6,
+  1, 5, 130, 130,
+  248, 248, 7, 7,
+  242, 242,
+  12, 81, 10, 121,
+  14, 159, 9, 224, 13,
+  225, 11, 229, 15, -1 };
+// for terminals with less than 16 colors...
+static int color_numbers_8[28] = { 0, 4, 2, 6,
+  1, 5, 3, 3,
+  7, 7, 7, 7,
+  0+8, 0+8,
+  4+8, 4+8, 2+8, 2+8,
+  6+8, 6+8, 1+8, 1+8, 5+8,
+  5+8, 3+8, 3+8, 7+8, -1 };
+
+// Lookup the "cterm" value to be used for color with index "idx" in
+// color_names[].
+// "boldp" will be set to TRUE or FALSE for a foreground color when using 8
+// colors, otherwise it will be unchanged.
+int lookup_color(const int idx, const bool foreground, TriState *const boldp)
 {
-  char_u      *name_end;
-  char_u      *linep;
-  char_u      *key_start;
-  char_u      *arg_start;
-  char_u      *key = NULL, *arg = NULL;
+  int color = color_numbers_16[idx];
+
+  // Use the _16 table to check if it's a valid color name.
+  if (color < 0) {
+    return -1;
+  }
+
+  if (t_colors == 8) {
+    // t_Co is 8: use the 8 colors table
+    color = color_numbers_8[idx];
+    if (foreground) {
+      // set/reset bold attribute to get light foreground
+      // colors (on some terminals, e.g. "linux")
+      if (color & 8) {
+        *boldp = kTrue;
+      } else {
+        *boldp = kFalse;
+      }
+    }
+    color &= 7;   // truncate to 8 colors
+  } else if (t_colors == 16) {
+    color = color_numbers_8[idx];
+  } else if (t_colors == 88) {
+    color = color_numbers_88[idx];
+  } else if (t_colors >= 256) {
+    color = color_numbers_256[idx];
+  }
+  return color;
+}
+
+
+/// Handle ":highlight" command
+///
+/// When using ":highlight clear" this is called recursively for each group with
+/// forceit and init being both true.
+///
+/// @param[in]  line  Command arguments.
+/// @param[in]  forceit  True when bang is given, allows to link group even if
+///                      it has its own settings.
+/// @param[in]  init  True when initializing.
+void do_highlight(const char *line, const bool forceit, const bool init)
+  FUNC_ATTR_NONNULL_ALL
+{
+  const char *name_end;
+  const char *linep;
+  const char *key_start;
+  const char *arg_start;
   long i;
   int off;
   int len;
   int attr;
   int id;
   int idx;
-  int dodefault = FALSE;
-  int doclear = FALSE;
-  int dolink = FALSE;
-  int error = FALSE;
+  struct hl_group item_before;
+  bool dodefault = false;
+  bool doclear = false;
+  bool dolink = false;
+  bool error = false;
   int color;
-  int is_normal_group = FALSE;                  /* "Normal" group */
+  bool is_normal_group = false;   // "Normal" group
+  bool did_highlight_changed = false;
 
-  /*
-   * If no argument, list current highlighting.
-   */
-  if (ends_excmd(*line)) {
-    for (int i = 1; i <= highlight_ga.ga_len && !got_int; ++i)
-      /* TODO: only call when the group has attributes set */
+  // If no argument, list current highlighting.
+  if (ends_excmd((uint8_t)(*line))) {
+    for (i = 1; i <= highlight_ga.ga_len && !got_int; i++) {
+      // TODO(brammool): only call when the group has attributes set
       highlight_list_one(i);
+    }
     return;
   }
 
-  /*
-   * Isolate the name.
-   */
-  name_end = skiptowhite(line);
-  linep = skipwhite(name_end);
+  // Isolate the name.
+  name_end = (const char *)skiptowhite((const char_u *)line);
+  linep = (const char *)skipwhite((const char_u *)name_end);
 
-  /*
-   * Check for "default" argument.
-   */
-  if (STRNCMP(line, "default", name_end - line) == 0) {
-    dodefault = TRUE;
+  // Check for "default" argument.
+  if (strncmp(line, "default", name_end - line) == 0) {
+    dodefault = true;
     line = linep;
-    name_end = skiptowhite(line);
-    linep = skipwhite(name_end);
+    name_end = (const char *)skiptowhite((const char_u *)line);
+    linep = (const char *)skipwhite((const char_u *)name_end);
   }
 
-  /*
-   * Check for "clear" or "link" argument.
-   */
-  if (STRNCMP(line, "clear", name_end - line) == 0)
-    doclear = TRUE;
-  if (STRNCMP(line, "link", name_end - line) == 0)
-    dolink = TRUE;
+  // Check for "clear" or "link" argument.
+  if (strncmp(line, "clear", name_end - line) == 0) {
+    doclear = true;
+  } else if (strncmp(line, "link", name_end - line) == 0) {
+    dolink = true;
+  }
 
-  /*
-   * ":highlight {group-name}": list highlighting for one group.
-   */
-  if (!doclear && !dolink && ends_excmd(*linep)) {
-    id = syn_namen2id(line, (int)(name_end - line));
-    if (id == 0)
-      EMSG2(_("E411: highlight group not found: %s"), line);
-    else
+  // ":highlight {group-name}": list highlighting for one group.
+  if (!doclear && !dolink && ends_excmd((uint8_t)(*linep))) {
+    id = syn_namen2id((const char_u *)line, (int)(name_end - line));
+    if (id == 0) {
+      emsgf(_("E411: highlight group not found: %s"), line);
+    } else {
       highlight_list_one(id);
+    }
     return;
   }
 
-  /*
-   * Handle ":highlight link {from} {to}" command.
-   */
+  // Handle ":highlight link {from} {to}" command.
   if (dolink) {
-    char_u      *from_start = linep;
-    char_u      *from_end;
-    char_u      *to_start;
-    char_u      *to_end;
+    const char *from_start = linep;
+    const char *from_end;
+    const char *to_start;
+    const char *to_end;
     int from_id;
     int to_id;
 
-    from_end = skiptowhite(from_start);
-    to_start = skipwhite(from_end);
-    to_end   = skiptowhite(to_start);
+    from_end = (const char *)skiptowhite((const char_u *)from_start);
+    to_start = (const char *)skipwhite((const char_u *)from_end);
+    to_end   = (const char *)skiptowhite((const char_u *)to_start);
 
-    if (ends_excmd(*from_start) || ends_excmd(*to_start)) {
-      EMSG2(_("E412: Not enough arguments: \":highlight link %s\""),
-          from_start);
+    if (ends_excmd((uint8_t)(*from_start))
+        || ends_excmd((uint8_t)(*to_start))) {
+      emsgf(_("E412: Not enough arguments: \":highlight link %s\""),
+            from_start);
       return;
     }
 
-    if (!ends_excmd(*skipwhite(to_end))) {
-      EMSG2(_("E413: Too many arguments: \":highlight link %s\""), from_start);
+    if (!ends_excmd(*skipwhite((const char_u *)to_end))) {
+      emsgf(_("E413: Too many arguments: \":highlight link %s\""), from_start);
       return;
     }
 
-    from_id = syn_check_group(from_start, (int)(from_end - from_start));
-    if (STRNCMP(to_start, "NONE", 4) == 0)
+    from_id = syn_check_group((const char_u *)from_start,
+                              (int)(from_end - from_start));
+    if (strncmp(to_start, "NONE", 4) == 0) {
       to_id = 0;
-    else
-      to_id = syn_check_group(to_start, (int)(to_end - to_start));
+    } else {
+      to_id = syn_check_group((const char_u *)to_start,
+                              (int)(to_end - to_start));
+    }
 
     if (from_id > 0 && (!init || HL_TABLE()[from_id - 1].sg_set == 0)) {
-      /*
-       * Don't allow a link when there already is some highlighting
-       * for the group, unless '!' is used
-       */
+      // Don't allow a link when there already is some highlighting
+      // for the group, unless '!' is used
       if (to_id > 0 && !forceit && !init
           && hl_has_settings(from_id - 1, dodefault)) {
-        if (sourcing_name == NULL && !dodefault)
+        if (sourcing_name == NULL && !dodefault) {
           EMSG(_("E414: group has settings, highlight link ignored"));
-      } else {
-        if (!init)
+        }
+      } else if (HL_TABLE()[from_id - 1].sg_link != to_id
+                 || HL_TABLE()[from_id - 1].sg_scriptID != current_SID
+                 || HL_TABLE()[from_id - 1].sg_cleared) {
+        if (!init) {
           HL_TABLE()[from_id - 1].sg_set |= SG_LINK;
+        }
         HL_TABLE()[from_id - 1].sg_link = to_id;
         HL_TABLE()[from_id - 1].sg_scriptID = current_SID;
+        HL_TABLE()[from_id - 1].sg_cleared = false;
         redraw_all_later(SOME_VALID);
+
+        // Only call highlight changed() once after multiple changes
+        need_highlight_changed = true;
       }
     }
-
-    /* Only call highlight_changed() once, after sourcing a syntax file */
-    need_highlight_changed = TRUE;
 
     return;
   }
 
   if (doclear) {
-    /*
-     * ":highlight clear [group]" command.
-     */
+    // ":highlight clear [group]" command.
     line = linep;
-    if (ends_excmd(*line)) {
-      do_unlet((char_u *)"colors_name", TRUE);
+    if (ends_excmd((uint8_t)(*line))) {
+      do_unlet(S_LEN("colors_name"), true);
       restore_cterm_colors();
 
-      /*
-       * Clear all default highlight groups and load the defaults.
-       */
-      for (int idx = 0; idx < highlight_ga.ga_len; ++idx) {
-        highlight_clear(idx);
+      // Clear all default highlight groups and load the defaults.
+      for (int j = 0; j < highlight_ga.ga_len; j++) {
+        highlight_clear(j);
       }
-      init_highlight(TRUE, TRUE);
+      init_highlight(true, true);
       highlight_changed();
-      redraw_later_clear();
+      redraw_all_later(NOT_VALID);
       return;
     }
-    name_end = skiptowhite(line);
-    linep = skipwhite(name_end);
+    name_end = (const char *)skiptowhite((const char_u *)line);
+    linep = (const char *)skipwhite((const char_u *)name_end);
   }
 
-  /*
-   * Find the group name in the table.  If it does not exist yet, add it.
-   */
-  id = syn_check_group(line, (int)(name_end - line));
-  if (id == 0)                          /* failed (out of memory) */
+  // Find the group name in the table.  If it does not exist yet, add it.
+  id = syn_check_group((const char_u *)line, (int)(name_end - line));
+  if (id == 0) {  // Failed (out of memory).
     return;
-  idx = id - 1;                         /* index is ID minus one */
+  }
+  idx = id - 1;  // Index is ID minus one.
 
-  /* Return if "default" was used and the group already has settings. */
-  if (dodefault && hl_has_settings(idx, TRUE))
+  // Return if "default" was used and the group already has settings
+  if (dodefault && hl_has_settings(idx, true)) {
     return;
+  }
 
-  if (STRCMP(HL_TABLE()[idx].sg_name_u, "NORMAL") == 0)
-    is_normal_group = TRUE;
+  // Make a copy so we can check if any attribute actually changed
+  item_before = HL_TABLE()[idx];
+  is_normal_group = (STRCMP(HL_TABLE()[idx].sg_name_u, "NORMAL") == 0);
 
-  /* Clear the highlighting for ":hi clear {group}" and ":hi clear". */
+  // Clear the highlighting for ":hi clear {group}" and ":hi clear".
   if (doclear || (forceit && init)) {
     highlight_clear(idx);
-    if (!doclear)
+    if (!doclear) {
       HL_TABLE()[idx].sg_set = 0;
+    }
   }
 
-  if (!doclear)
-    while (!ends_excmd(*linep)) {
+  char *key = NULL;
+  char *arg = NULL;
+  if (!doclear) {
+    while (!ends_excmd((uint8_t)(*linep))) {
       key_start = linep;
       if (*linep == '=') {
-        EMSG2(_("E415: unexpected equal sign: %s"), key_start);
-        error = TRUE;
+        emsgf(_("E415: unexpected equal sign: %s"), key_start);
+        error = true;
         break;
       }
 
@@ -6279,61 +6622,58 @@ do_highlight (
         linep++;
       }
       xfree(key);
-      key = vim_strnsave_up(key_start, (int)(linep - key_start));
-      linep = skipwhite(linep);
+      key = (char *)vim_strnsave_up((const char_u *)key_start,
+                                    (int)(linep - key_start));
+      linep = (const char *)skipwhite((const char_u *)linep);
 
-      if (STRCMP(key, "NONE") == 0) {
+      if (strcmp(key, "NONE") == 0) {
         if (!init || HL_TABLE()[idx].sg_set == 0) {
-          if (!init)
+          if (!init) {
             HL_TABLE()[idx].sg_set |= SG_CTERM+SG_GUI;
+          }
           highlight_clear(idx);
         }
         continue;
       }
 
-      /*
-       * Check for the equal sign.
-       */
+      // Check for the equal sign.
       if (*linep != '=') {
-        EMSG2(_("E416: missing equal sign: %s"), key_start);
-        error = TRUE;
+        emsgf(_("E416: missing equal sign: %s"), key_start);
+        error = true;
         break;
       }
-      ++linep;
+      linep++;
 
-      /*
-       * Isolate the argument.
-       */
-      linep = skipwhite(linep);
-      if (*linep == '\'') {             /* guifg='color name' */
+      // Isolate the argument.
+      linep = (const char *)skipwhite((const char_u *)linep);
+      if (*linep == '\'') {  // guifg='color name'
         arg_start = ++linep;
-        linep = vim_strchr(linep, '\'');
+        linep = strchr(linep, '\'');
         if (linep == NULL) {
-          EMSG2(_(e_invarg2), key_start);
-          error = TRUE;
+          emsgf(_(e_invarg2), key_start);
+          error = true;
           break;
         }
       } else {
         arg_start = linep;
-        linep = skiptowhite(linep);
+        linep = (const char *)skiptowhite((const char_u *)linep);
       }
       if (linep == arg_start) {
-        EMSG2(_("E417: missing argument: %s"), key_start);
-        error = TRUE;
+        emsgf(_("E417: missing argument: %s"), key_start);
+        error = true;
         break;
       }
       xfree(arg);
-      arg = vim_strnsave(arg_start, (int)(linep - arg_start));
+      arg = xstrndup(arg_start, (size_t)(linep - arg_start));
 
-      if (*linep == '\'')
-        ++linep;
+      if (*linep == '\'') {
+        linep++;
+      }
 
-      /*
-       * Store the argument.
-       */
-      if (  STRCMP(key, "TERM") == 0
-            || STRCMP(key, "CTERM") == 0
-            || STRCMP(key, "GUI") == 0) {
+      // Store the argument.
+      if (strcmp(key, "TERM") == 0
+          || strcmp(key, "CTERM") == 0
+          || strcmp(key, "GUI") == 0) {
         attr = 0;
         off = 0;
         while (arg[off] != NUL) {
@@ -6346,52 +6686,56 @@ do_highlight (
             }
           }
           if (i < 0) {
-            EMSG2(_("E418: Illegal value: %s"), arg);
-            error = TRUE;
+            emsgf(_("E418: Illegal value: %s"), arg);
+            error = true;
             break;
           }
-          if (arg[off] == ',')                  /* another one follows */
-            ++off;
+          if (arg[off] == ',') {  // Another one follows.
+            off++;
+          }
         }
-        if (error)
+        if (error) {
           break;
+        }
         if (*key == 'C')   {
           if (!init || !(HL_TABLE()[idx].sg_set & SG_CTERM)) {
-            if (!init)
+            if (!init) {
               HL_TABLE()[idx].sg_set |= SG_CTERM;
+            }
             HL_TABLE()[idx].sg_cterm = attr;
-            HL_TABLE()[idx].sg_cterm_bold = FALSE;
+            HL_TABLE()[idx].sg_cterm_bold = false;
           }
         } else if (*key == 'G') {
           if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI)) {
-            if (!init)
+            if (!init) {
               HL_TABLE()[idx].sg_set |= SG_GUI;
+            }
             HL_TABLE()[idx].sg_gui = attr;
           }
         }
       } else if (STRCMP(key, "FONT") == 0)   {
-        /* in non-GUI fonts are simply ignored */
-      } else if (STRCMP(key,
-                     "CTERMFG") == 0 || STRCMP(key, "CTERMBG") == 0)   {
+        // in non-GUI fonts are simply ignored
+      } else if (STRCMP(key, "CTERMFG") == 0 || STRCMP(key, "CTERMBG") == 0) {
         if (!init || !(HL_TABLE()[idx].sg_set & SG_CTERM)) {
-          if (!init)
+          if (!init) {
             HL_TABLE()[idx].sg_set |= SG_CTERM;
+          }
 
           /* When setting the foreground color, and previously the "bold"
            * flag was set for a light color, reset it now */
           if (key[5] == 'F' && HL_TABLE()[idx].sg_cterm_bold) {
             HL_TABLE()[idx].sg_cterm &= ~HL_BOLD;
-            HL_TABLE()[idx].sg_cterm_bold = FALSE;
+            HL_TABLE()[idx].sg_cterm_bold = false;
           }
 
-          if (ascii_isdigit(*arg))
+          if (ascii_isdigit(*arg)) {
             color = atoi((char *)arg);
-          else if (STRICMP(arg, "fg") == 0) {
-            if (cterm_normal_fg_color)
+          } else if (STRICMP(arg, "fg") == 0) {
+            if (cterm_normal_fg_color) {
               color = cterm_normal_fg_color - 1;
-            else {
+            } else {
               EMSG(_("E419: FG color unknown"));
-              error = TRUE;
+              error = true;
               break;
             }
           } else if (STRICMP(arg, "bg") == 0)   {
@@ -6399,134 +6743,81 @@ do_highlight (
               color = cterm_normal_bg_color - 1;
             else {
               EMSG(_("E420: BG color unknown"));
-              error = TRUE;
+              error = true;
               break;
             }
           } else {
-            static char *(color_names[28]) = {
-              "Black", "DarkBlue", "DarkGreen", "DarkCyan",
-              "DarkRed", "DarkMagenta", "Brown", "DarkYellow",
-              "Gray", "Grey",
-              "LightGray", "LightGrey", "DarkGray", "DarkGrey",
-              "Blue", "LightBlue", "Green", "LightGreen",
-              "Cyan", "LightCyan", "Red", "LightRed", "Magenta",
-              "LightMagenta", "Yellow", "LightYellow", "White", "NONE"
-            };
-            static int color_numbers_16[28] = {0, 1, 2, 3,
-                                               4, 5, 6, 6,
-                                               7, 7,
-                                               7, 7, 8, 8,
-                                               9, 9, 10, 10,
-                                               11, 11, 12, 12, 13,
-                                               13, 14, 14, 15, -1};
-            /* for xterm with 88 colors... */
-            static int color_numbers_88[28] = {0, 4, 2, 6,
-                                               1, 5, 32, 72,
-                                               84, 84,
-                                               7, 7, 82, 82,
-                                               12, 43, 10, 61,
-                                               14, 63, 9, 74, 13,
-                                               75, 11, 78, 15, -1};
-            /* for xterm with 256 colors... */
-            static int color_numbers_256[28] = {0, 4, 2, 6,
-                                                1, 5, 130, 130,
-                                                248, 248,
-                                                7, 7, 242, 242,
-                                                12, 81, 10, 121,
-                                                14, 159, 9, 224, 13,
-                                                225, 11, 229, 15, -1};
-            /* for terminals with less than 16 colors... */
-            static int color_numbers_8[28] = {0, 4, 2, 6,
-                                              1, 5, 3, 3,
-                                              7, 7,
-                                              7, 7, 0+8, 0+8,
-                                              4+8, 4+8, 2+8, 2+8,
-                                              6+8, 6+8, 1+8, 1+8, 5+8,
-                                              5+8, 3+8, 3+8, 7+8, -1};
-
-            /* reduce calls to STRICMP a bit, it can be slow */
+            // Reduce calls to STRICMP a bit, it can be slow.
             off = TOUPPER_ASC(*arg);
-            for (i = ARRAY_SIZE(color_names); --i >= 0; )
+            for (i = ARRAY_SIZE(color_names); --i >= 0; ) {
               if (off == color_names[i][0]
-                  && STRICMP(arg + 1, color_names[i] + 1) == 0)
+                  && STRICMP(arg + 1, color_names[i] + 1) == 0) {
                 break;
+              }
+            }
             if (i < 0) {
-              EMSG2(_(
-                      "E421: Color name or number not recognized: %s"),
-                  key_start);
-              error = TRUE;
+              emsgf(_("E421: Color name or number not recognized: %s"),
+                    key_start);
+              error = true;
               break;
             }
 
-            /* Use the _16 table to check if its a valid color name. */
-            color = color_numbers_16[i];
-            if (color >= 0) {
-              if (t_colors == 8) {
-                /* t_Co is 8: use the 8 colors table */
-                color = color_numbers_8[i];
-                if (key[5] == 'F') {
-                  /* set/reset bold attribute to get light foreground
-                   * colors (on some terminals, e.g. "linux") */
-                  if (color & 8) {
-                    HL_TABLE()[idx].sg_cterm |= HL_BOLD;
-                    HL_TABLE()[idx].sg_cterm_bold = TRUE;
-                  } else
-                    HL_TABLE()[idx].sg_cterm &= ~HL_BOLD;
-                }
-                color &= 7;             // truncate to 8 colors
-              } else if (t_colors == 16 || t_colors == 88 || t_colors >= 256) {
-                if (t_colors == 88) {
-                    color = color_numbers_88[i];
-                } else if (t_colors >= 256) {
-                    color = color_numbers_256[i];
-                } else {
-                    color = color_numbers_8[i];
-                }
-              }
+            TriState bold = kNone;
+            color = lookup_color(i, key[5] == 'F', &bold);
+
+            // set/reset bold attribute to get light foreground
+            // colors (on some terminals, e.g. "linux")
+            if (bold == kTrue) {
+              HL_TABLE()[idx].sg_cterm |= HL_BOLD;
+              HL_TABLE()[idx].sg_cterm_bold = true;
+            } else if (bold == kFalse) {
+              HL_TABLE()[idx].sg_cterm &= ~HL_BOLD;
             }
           }
-          /* Add one to the argument, to avoid zero.  Zero is used for
-           * "NONE", then "color" is -1. */
+          // Add one to the argument, to avoid zero.  Zero is used for
+          // "NONE", then "color" is -1.
           if (key[5] == 'F') {
             HL_TABLE()[idx].sg_cterm_fg = color + 1;
             if (is_normal_group) {
               cterm_normal_fg_color = color + 1;
-              cterm_normal_fg_bold = (HL_TABLE()[idx].sg_cterm & HL_BOLD);
-              {
-                must_redraw = CLEAR;
-              }
             }
           } else {
             HL_TABLE()[idx].sg_cterm_bg = color + 1;
             if (is_normal_group) {
               cterm_normal_bg_color = color + 1;
               if (!ui_rgb_attached()) {
-                must_redraw = CLEAR;
                 if (color >= 0) {
-                  if (t_colors < 16)
-                    i = (color == 0 || color == 4);
-                  else
-                    i = (color < 7 || color == 8);
-                  /* Set the 'background' option if the value is
-                   * wrong. */
-                  if (i != (*p_bg == 'd'))
-                    set_option_value((char_u *)"bg", 0L,
-                        i ?  (char_u *)"dark"
-                        : (char_u *)"light", 0);
+                  int dark = -1;
+
+                  if (t_colors < 16) {
+                    dark = (color == 0 || color == 4);
+                  } else if (color < 16) {
+                    // Limit the heuristic to the standard 16 colors
+                    dark = (color < 7 || color == 8);
+                  }
+                  // Set the 'background' option if the value is
+                  // wrong.
+                  if (dark != -1
+                      && dark != (*p_bg == 'd')
+                      && !option_was_set("bg")) {
+                    set_option_value("bg", 0L, (dark ? "dark" : "light"), 0);
+                    reset_option_was_set("bg");
+                  }
                 }
               }
             }
           }
         }
-      } else if (STRCMP(key, "GUIFG") == 0)   {
+      } else if (strcmp(key, "GUIFG") == 0)   {
         if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI)) {
-          if (!init)
+          if (!init) {
             HL_TABLE()[idx].sg_set |= SG_GUI;
+          }
 
           xfree(HL_TABLE()[idx].sg_rgb_fg_name);
-          if (STRCMP(arg, "NONE")) {
-            HL_TABLE()[idx].sg_rgb_fg_name = (uint8_t *)xstrdup((char *)arg);
-            HL_TABLE()[idx].sg_rgb_fg = name_to_color(arg);
+          if (strcmp(arg, "NONE")) {
+            HL_TABLE()[idx].sg_rgb_fg_name = (char_u *)xstrdup((char *)arg);
+            HL_TABLE()[idx].sg_rgb_fg = name_to_color((const char_u *)arg);
           } else {
             HL_TABLE()[idx].sg_rgb_fg_name = NULL;
             HL_TABLE()[idx].sg_rgb_fg = -1;
@@ -6538,13 +6829,14 @@ do_highlight (
         }
       } else if (STRCMP(key, "GUIBG") == 0)   {
         if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI)) {
-          if (!init)
+          if (!init) {
             HL_TABLE()[idx].sg_set |= SG_GUI;
+          }
 
           xfree(HL_TABLE()[idx].sg_rgb_bg_name);
           if (STRCMP(arg, "NONE") != 0) {
-            HL_TABLE()[idx].sg_rgb_bg_name = (uint8_t *)xstrdup((char *)arg);
-            HL_TABLE()[idx].sg_rgb_bg = name_to_color(arg);
+            HL_TABLE()[idx].sg_rgb_bg_name = (char_u *)xstrdup((char *)arg);
+            HL_TABLE()[idx].sg_rgb_bg = name_to_color((const char_u *)arg);
           } else {
             HL_TABLE()[idx].sg_rgb_bg_name = NULL;
             HL_TABLE()[idx].sg_rgb_bg = -1;
@@ -6554,15 +6846,16 @@ do_highlight (
         if (is_normal_group) {
           normal_bg = HL_TABLE()[idx].sg_rgb_bg;
         }
-      } else if (STRCMP(key, "GUISP") == 0)   {
+      } else if (strcmp(key, "GUISP") == 0)   {
         if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI)) {
-          if (!init)
+          if (!init) {
             HL_TABLE()[idx].sg_set |= SG_GUI;
+          }
 
           xfree(HL_TABLE()[idx].sg_rgb_sp_name);
-          if (STRCMP(arg, "NONE") != 0) {
-            HL_TABLE()[idx].sg_rgb_sp_name = (uint8_t *)xstrdup((char *)arg);
-            HL_TABLE()[idx].sg_rgb_sp = name_to_color(arg);
+          if (strcmp(arg, "NONE") != 0) {
+            HL_TABLE()[idx].sg_rgb_sp_name = (char_u *)xstrdup((char *)arg);
+            HL_TABLE()[idx].sg_rgb_sp = name_to_color((const char_u *)arg);
           } else {
             HL_TABLE()[idx].sg_rgb_sp_name = NULL;
             HL_TABLE()[idx].sg_rgb_sp = -1;
@@ -6572,49 +6865,60 @@ do_highlight (
         if (is_normal_group) {
           normal_sp = HL_TABLE()[idx].sg_rgb_sp;
         }
-      } else if (STRCMP(key, "START") == 0 || STRCMP(key, "STOP") == 0)   {
+      } else if (strcmp(key, "START") == 0 || strcmp(key, "STOP") == 0)   {
         // Ignored for now
       } else {
-        EMSG2(_("E423: Illegal argument: %s"), key_start);
-        error = TRUE;
+        emsgf(_("E423: Illegal argument: %s"), key_start);
+        error = true;
         break;
       }
+      HL_TABLE()[idx].sg_cleared = false;
 
-      /*
-       * When highlighting has been given for a group, don't link it.
-       */
-      if (!init || !(HL_TABLE()[idx].sg_set & SG_LINK))
+      // When highlighting has been given for a group, don't link it.
+      if (!init || !(HL_TABLE()[idx].sg_set & SG_LINK)) {
         HL_TABLE()[idx].sg_link = 0;
+      }
 
-      /*
-       * Continue with next argument.
-       */
-      linep = skipwhite(linep);
+      // Continue with next argument.
+      linep = (const char *)skipwhite((const char_u *)linep);
     }
+  }
 
-  /*
-   * If there is an error, and it's a new entry, remove it from the table.
-   */
-  if (error && idx == highlight_ga.ga_len)
+  // If there is an error, and it's a new entry, remove it from the table.
+  if (error && idx == highlight_ga.ga_len) {
     syn_unadd_group();
-  else {
-    if (is_normal_group) {
-      HL_TABLE()[idx].sg_attr = 0;
+  } else {
+    if (!error && is_normal_group) {
       // Need to update all groups, because they might be using "bg" and/or
       // "fg", which have been changed now.
       highlight_attr_set_all();
-      // If the normal group has changed, it is simpler to refresh every UI
-      ui_refresh();
-    } else
+
+      if (!ui_has(kUILinegrid) && starting == 0) {
+        // Older UIs assume that we clear the screen after normal group is
+        // changed
+        ui_refresh();
+      } else {
+        // TUI and newer UIs will repaint the screen themselves. NOT_VALID
+        // redraw below will still handle usages of guibg=fg etc.
+        ui_default_colors_set();
+      }
+      did_highlight_changed = true;
+      redraw_all_later(NOT_VALID);
+    } else {
       set_hl_attr(idx);
+    }
     HL_TABLE()[idx].sg_scriptID = current_SID;
-    redraw_all_later(NOT_VALID);
   }
   xfree(key);
   xfree(arg);
 
-  /* Only call highlight_changed() once, after sourcing a syntax file */
-  need_highlight_changed = TRUE;
+  // Only call highlight_changed() once, after a sequence of highlight
+  // commands, and only if an attribute actually changed
+  if (memcmp(&HL_TABLE()[idx], &item_before, sizeof(item_before)) != 0
+      && !did_highlight_changed) {
+    redraw_all_later(NOT_VALID);
+    need_highlight_changed = true;
+  }
 }
 
 #if defined(EXITFREE)
@@ -6640,7 +6944,6 @@ void restore_cterm_colors(void)
   normal_bg = -1;
   normal_sp = -1;
   cterm_normal_fg_color = 0;
-  cterm_normal_fg_bold = 0;
   cterm_normal_bg_color = 0;
 }
 
@@ -6664,9 +6967,11 @@ static int hl_has_settings(int idx, int check_link)
  */
 static void highlight_clear(int idx)
 {
+  HL_TABLE()[idx].sg_cleared = true;
+
   HL_TABLE()[idx].sg_attr = 0;
   HL_TABLE()[idx].sg_cterm = 0;
-  HL_TABLE()[idx].sg_cterm_bold = FALSE;
+  HL_TABLE()[idx].sg_cterm_bold = false;
   HL_TABLE()[idx].sg_cterm_fg = 0;
   HL_TABLE()[idx].sg_cterm_bg = 0;
   HL_TABLE()[idx].sg_gui = 0;
@@ -6687,171 +6992,17 @@ static void highlight_clear(int idx)
 }
 
 
-/*
- * Table with the specifications for an attribute number.
- * Note that this table is used by ALL buffers.  This is required because the
- * GUI can redraw at any time for any buffer.
- */
-static garray_T attr_table = GA_EMPTY_INIT_VALUE;
-
-#define ATTR_ENTRY(idx) ((attrentry_T *)attr_table.ga_data)[idx]
-
-
-/*
- * Return the attr number for a set of colors and font.
- * Add a new entry to the term_attr_table, attr_table or gui_attr_table
- * if the combination is new.
- * Return 0 for error.
- */
-int get_attr_entry(attrentry_T *aep)
-{
-  garray_T *table = &attr_table;
-  attrentry_T *taep;
-  static int recursive = FALSE;
-
-  /*
-   * Init the table, in case it wasn't done yet.
-   */
-  table->ga_itemsize = sizeof(attrentry_T);
-  ga_set_growsize(table, 7);
-
-  /*
-   * Try to find an entry with the same specifications.
-   */
-  for (int i = 0; i < table->ga_len; ++i) {
-    taep = &(((attrentry_T *)table->ga_data)[i]);
-    if (aep->cterm_ae_attr == taep->cterm_ae_attr
-        && aep->cterm_fg_color == taep->cterm_fg_color
-        && aep->cterm_bg_color == taep->cterm_bg_color
-        && aep->rgb_ae_attr == taep->rgb_ae_attr
-        && aep->rgb_fg_color == taep->rgb_fg_color
-        && aep->rgb_bg_color == taep->rgb_bg_color
-        && aep->rgb_sp_color == taep->rgb_sp_color) {
-      return i + ATTR_OFF;
-    }
-  }
-
-  if (table->ga_len + ATTR_OFF > MAX_TYPENR) {
-    /*
-     * Running out of attribute entries!  remove all attributes, and
-     * compute new ones for all groups.
-     * When called recursively, we are really out of numbers.
-     */
-    if (recursive) {
-      EMSG(_("E424: Too many different highlighting attributes in use"));
-      return 0;
-    }
-    recursive = TRUE;
-
-    clear_hl_tables();
-
-    must_redraw = CLEAR;
-
-    for (int i = 0; i < highlight_ga.ga_len; ++i) {
-      set_hl_attr(i);
-    }
-
-    recursive = FALSE;
-  }
-
-  
-  // This is a new combination of colors and font, add an entry.
-  taep = GA_APPEND_VIA_PTR(attrentry_T, table);
-  memset(taep, 0, sizeof(*taep));
-  taep->cterm_ae_attr = aep->cterm_ae_attr;
-  taep->cterm_fg_color = aep->cterm_fg_color;
-  taep->cterm_bg_color = aep->cterm_bg_color;
-  taep->rgb_ae_attr = aep->rgb_ae_attr;
-  taep->rgb_fg_color = aep->rgb_fg_color;
-  taep->rgb_bg_color = aep->rgb_bg_color;
-  taep->rgb_sp_color = aep->rgb_sp_color;
-
-  return table->ga_len - 1 + ATTR_OFF;
-}
-
-// Clear all highlight tables.
-void clear_hl_tables(void)
-{
-  ga_clear(&attr_table);
-}
-
-// Combine special attributes (e.g., for spelling) with other attributes
-// (e.g., for syntax highlighting).
-// "prim_attr" overrules "char_attr".
-// This creates a new group when required.
-// Since we expect there to be few spelling mistakes we don't cache the
-// result.
-// Return the resulting attributes.
-int hl_combine_attr(int char_attr, int prim_attr)
-{
-  attrentry_T *char_aep = NULL;
-  attrentry_T *spell_aep;
-  attrentry_T new_en;
-
-  if (char_attr == 0) {
-    return prim_attr;
-  }
-
-  if (prim_attr == 0) {
-    return char_attr;
-  }
-
-  // Find the entry for char_attr
-  char_aep = syn_cterm_attr2entry(char_attr);
-
-  if (char_aep != NULL) {
-    // Copy all attributes from char_aep to the new entry
-    new_en = *char_aep;
-  } else {
-    memset(&new_en, 0, sizeof(new_en));
-  }
-
-  spell_aep = syn_cterm_attr2entry(prim_attr);
-  if (spell_aep != NULL) {
-    new_en.cterm_ae_attr |= spell_aep->cterm_ae_attr;
-    new_en.rgb_ae_attr |= spell_aep->rgb_ae_attr;
-
-    if (spell_aep->cterm_fg_color > 0) {
-      new_en.cterm_fg_color = spell_aep->cterm_fg_color;
-    }
-
-    if (spell_aep->cterm_bg_color > 0) {
-      new_en.cterm_bg_color = spell_aep->cterm_bg_color;
-    }
-
-    if (spell_aep->rgb_fg_color >= 0) {
-      new_en.rgb_fg_color = spell_aep->rgb_fg_color;
-    }
-
-    if (spell_aep->rgb_bg_color >= 0) {
-      new_en.rgb_bg_color = spell_aep->rgb_bg_color;
-    }
-
-    if (spell_aep->rgb_sp_color >= 0) {
-      new_en.rgb_sp_color = spell_aep->rgb_sp_color;
-    }
-  }
-  return get_attr_entry(&new_en);
-}
-
-attrentry_T *syn_cterm_attr2entry(int attr)
-{
-  attr -= ATTR_OFF;
-  if (attr >= attr_table.ga_len)          /* did ":syntax clear" */
-    return NULL;
-  return &(ATTR_ENTRY(attr));
-}
-
+/// \addtogroup LIST_XXX
+/// @{
 #define LIST_ATTR   1
 #define LIST_STRING 2
 #define LIST_INT    3
+/// @}
 
-static void highlight_list_one(int id)
+static void highlight_list_one(const int id)
 {
-  struct hl_group     *sgp;
-  int didh = FALSE;
-
-  sgp = &HL_TABLE()[id - 1];        /* index is ID minus one */
+  struct hl_group *const sgp = &HL_TABLE()[id - 1];  // index is ID minus one
+  bool didh = false;
 
   didh = highlight_list_arg(id, didh, LIST_ATTR,
       sgp->sg_cterm, NULL, "cterm");
@@ -6871,8 +7022,8 @@ static void highlight_list_one(int id)
 
   if (sgp->sg_link && !got_int) {
     (void)syn_list_header(didh, 9999, id);
-    didh = TRUE;
-    msg_puts_attr((char_u *)"links to", hl_attr(HLF_D));
+    didh = true;
+    msg_puts_attr("links to", HL_ATTR(HLF_D));
     msg_putchar(' ');
     msg_outtrans(HL_TABLE()[HL_TABLE()[id - 1].sg_link - 1].sg_name);
   }
@@ -6883,39 +7034,44 @@ static void highlight_list_one(int id)
     last_set_msg(sgp->sg_scriptID);
 }
 
-static int highlight_list_arg(int id, int didh, int type, int iarg, char_u *sarg, char *name)
+/// Outputs a highlight when doing ":hi MyHighlight"
+///
+/// @param type one of \ref LIST_XXX
+/// @param iarg integer argument used if \p type == LIST_INT
+/// @param sarg string used if \p type == LIST_STRING
+static bool highlight_list_arg(
+    const int id, bool didh, const int type, int iarg,
+    char_u *const sarg, const char *const name)
 {
   char_u buf[100];
-  char_u      *ts;
-  int i;
 
-  if (got_int)
-    return FALSE;
+  if (got_int) {
+    return false;
+  }
   if (type == LIST_STRING ? (sarg != NULL) : (iarg != 0)) {
-    ts = buf;
-    if (type == LIST_INT)
-      sprintf((char *)buf, "%d", iarg - 1);
-    else if (type == LIST_STRING)
+    char_u *ts = buf;
+    if (type == LIST_INT) {
+      snprintf((char *)buf, sizeof(buf), "%d", iarg - 1);
+    } else if (type == LIST_STRING) {
       ts = sarg;
-    else {   /* type == LIST_ATTR */
+    } else {    // type == LIST_ATTR
       buf[0] = NUL;
-      for (i = 0; hl_attr_table[i] != 0; ++i) {
+      for (int i = 0; hl_attr_table[i] != 0; i++) {
         if (iarg & hl_attr_table[i]) {
           if (buf[0] != NUL)
-            vim_strcat(buf, (char_u *)",", 100);
-          vim_strcat(buf, (char_u *)hl_name_table[i], 100);
+            xstrlcat((char *)buf, ",", 100);
+          xstrlcat((char *)buf, hl_name_table[i], 100);
           iarg &= ~hl_attr_table[i];                /* don't want "inverse" */
         }
       }
     }
 
-    (void)syn_list_header(didh,
-        (int)(vim_strsize(ts) + STRLEN(name) + 1), id);
-    didh = TRUE;
+    (void)syn_list_header(didh, (int)(vim_strsize(ts) + STRLEN(name) + 1), id);
+    didh = true;
     if (!got_int) {
       if (*name != NUL) {
-        MSG_PUTS_ATTR(name, hl_attr(HLF_D));
-        MSG_PUTS_ATTR("=", hl_attr(HLF_D));
+        MSG_PUTS_ATTR(name, HL_ATTR(HLF_D));
+        MSG_PUTS_ATTR("=", HL_ATTR(HLF_D));
       }
       msg_outtrans(ts);
     }
@@ -6923,21 +7079,21 @@ static int highlight_list_arg(int id, int didh, int type, int iarg, char_u *sarg
   return didh;
 }
 
-/*
- * Return "1" if highlight group "id" has attribute "flag".
- * Return NULL otherwise.
- */
-char_u *
-highlight_has_attr (
-    int id,
-    int flag,
-    int modec              // 'g' for GUI, 'c' for cterm
-)
+/// Check whether highlight group has attribute
+///
+/// @param[in]  id  Highlight group to check.
+/// @param[in]  flag  Attribute to check.
+/// @param[in]  modec  'g' for GUI, 'c' for term.
+///
+/// @return "1" if highlight group has attribute, NULL otherwise.
+const char *highlight_has_attr(const int id, const int flag, const int modec)
+  FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_PURE
 {
   int attr;
 
-  if (id <= 0 || id > highlight_ga.ga_len)
+  if (id <= 0 || id > highlight_ga.ga_len) {
     return NULL;
+  }
 
   if (modec == 'g') {
     attr = HL_TABLE()[id - 1].sg_gui;
@@ -6945,39 +7101,42 @@ highlight_has_attr (
     attr = HL_TABLE()[id - 1].sg_cterm;
   }
 
-  if (attr & flag)
-    return (char_u *)"1";
-  return NULL;
+  return (attr & flag) ? "1" : NULL;
 }
 
-/*
- * Return color name of highlight group "id".
- */
-char_u *
-highlight_color (
-    int id,
-    char_u *what,      /* "font", "fg", "bg", "sp", "fg#", "bg#" or "sp#" */
-    int modec              /* 'g' for GUI, 'c' for cterm, 't' for term */
-)
+/// Return color name of the given highlight group
+///
+/// @param[in]  id  Highlight group to work with.
+/// @param[in]  what  What to return: one of "font", "fg", "bg", "sp", "fg#",
+///                   "bg#" or "sp#".
+/// @param[in]  modec  'g' for GUI, 'c' for cterm and 't' for term.
+///
+/// @return color name, possibly in a static buffer. Buffer will be overwritten
+///         on next highlight_color() call. May return NULL.
+const char *highlight_color(const int id, const char *const what,
+                            const int modec)
+  FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_NONNULL_ALL
 {
-  static char_u name[20];
+  static char name[20];
   int n;
-  int fg = FALSE;
-  int sp = FALSE;
-  int font = FALSE;
+  bool fg = false;
+  bool sp = false;
+  bool font = false;
 
-  if (id <= 0 || id > highlight_ga.ga_len)
+  if (id <= 0 || id > highlight_ga.ga_len) {
     return NULL;
+  }
 
-  if (TOLOWER_ASC(what[0]) == 'f' && TOLOWER_ASC(what[1]) == 'g')
-    fg = TRUE;
-  else if (TOLOWER_ASC(what[0]) == 'f' && TOLOWER_ASC(what[1]) == 'o'
-           && TOLOWER_ASC(what[2]) == 'n' && TOLOWER_ASC(what[3]) == 't')
-    font = TRUE;
-  else if (TOLOWER_ASC(what[0]) == 's' && TOLOWER_ASC(what[1]) == 'p')
-    sp = TRUE;
-  else if (!(TOLOWER_ASC(what[0]) == 'b' && TOLOWER_ASC(what[1]) == 'g'))
+  if (TOLOWER_ASC(what[0]) == 'f' && TOLOWER_ASC(what[1]) == 'g') {
+    fg = true;
+  } else if (TOLOWER_ASC(what[0]) == 'f' && TOLOWER_ASC(what[1]) == 'o'
+             && TOLOWER_ASC(what[2]) == 'n' && TOLOWER_ASC(what[3]) == 't') {
+    font = true;
+  } else if (TOLOWER_ASC(what[0]) == 's' && TOLOWER_ASC(what[1]) == 'p') {
+    sp = true;
+  } else if (!(TOLOWER_ASC(what[0]) == 'b' && TOLOWER_ASC(what[1]) == 'g')) {
     return NULL;
+  }
   if (modec == 'g') {
     if (what[2] == '#' && ui_rgb_attached()) {
       if (fg) {
@@ -6990,19 +7149,20 @@ highlight_color (
       if (n < 0 || n > 0xffffff) {
         return NULL;
       }
-      snprintf((char *)name, sizeof(name), "#%06x", n);
+      snprintf(name, sizeof(name), "#%06x", n);
       return name;
     }
     if (fg) {
-      return HL_TABLE()[id - 1].sg_rgb_fg_name;
+      return (const char *)HL_TABLE()[id - 1].sg_rgb_fg_name;
     }
     if (sp) {
-      return HL_TABLE()[id - 1].sg_rgb_sp_name;
+      return (const char *)HL_TABLE()[id - 1].sg_rgb_sp_name;
     }
-    return HL_TABLE()[id - 1].sg_rgb_bg_name;
+    return (const char *)HL_TABLE()[id - 1].sg_rgb_bg_name;
   }
-  if (font || sp)
+  if (font || sp) {
     return NULL;
+  }
   if (modec == 'c') {
     if (fg) {
       n = HL_TABLE()[id - 1].sg_cterm_fg - 1;
@@ -7012,40 +7172,41 @@ highlight_color (
     if (n < 0) {
       return NULL;
     }
-    snprintf((char *)name, sizeof(name), "%d", n);
+    snprintf(name, sizeof(name), "%d", n);
     return name;
   }
-  /* term doesn't have color */
+  // term doesn't have color.
   return NULL;
 }
 
-/*
- * Output the syntax list header.
- * Return TRUE when started a new line.
- */
-static int 
-syn_list_header (
-    int did_header,                 /* did header already */
-    int outlen,                     /* length of string that comes */
-    int id                         /* highlight group id */
-)
+/// Output the syntax list header.
+///
+/// @param did_header did header already
+/// @param outlen length of string that comes
+/// @param id highlight group id
+/// @return true when started a new line.
+static bool syn_list_header(const bool did_header, const int outlen,
+                            const int id)
 {
   int endcol = 19;
-  int newline = TRUE;
+  bool newline = true;
 
   if (!did_header) {
     msg_putchar('\n');
-    if (got_int)
-      return TRUE;
+    if (got_int) {
+      return true;
+    }
     msg_outtrans(HL_TABLE()[id - 1].sg_name);
     endcol = 15;
   } else if (msg_col + outlen + 1 >= Columns)   {
     msg_putchar('\n');
-    if (got_int)
-      return TRUE;
+    if (got_int) {
+      return true;
+    }
   } else {
-    if (msg_col >= endcol)      /* wrap around is like starting a new line */
-      newline = FALSE;
+    if (msg_col >= endcol) {    // wrap around is like starting a new line
+      newline = false;
+    }
   }
 
   if (msg_col >= endcol)        /* output at least one space */
@@ -7057,28 +7218,20 @@ syn_list_header (
 
   /* Show "xxx" with the attributes. */
   if (!did_header) {
-    msg_puts_attr((char_u *)"xxx", syn_id2attr(id));
+    msg_puts_attr("xxx", syn_id2attr(id));
     msg_putchar(' ');
   }
 
   return newline;
 }
 
-/*
- * Set the attribute numbers for a highlight group.
- * Called after one of the attributes has changed.
- */
-static void 
-set_hl_attr (
-    int idx                    /* index in array */
-)
+/// Set the attribute numbers for a highlight group.
+/// Called after one of the attributes has changed.
+/// @param idx corrected highlight index
+static void set_hl_attr(int idx)
 {
-  attrentry_T at_en;
+  HlAttrs at_en = HLATTRS_INIT;
   struct hl_group     *sgp = HL_TABLE() + idx;
-
-  /* The "Normal" group doesn't need an attribute number */
-  if (sgp->sg_name_u != NULL && STRCMP(sgp->sg_name_u, "NORMAL") == 0)
-    return;
 
   at_en.cterm_ae_attr = sgp->sg_cterm;
   at_en.cterm_fg_color = sgp->sg_cterm_fg;
@@ -7091,22 +7244,19 @@ set_hl_attr (
   at_en.rgb_bg_color = sgp->sg_rgb_bg_name ? sgp->sg_rgb_bg : -1;
   at_en.rgb_sp_color = sgp->sg_rgb_sp_name ? sgp->sg_rgb_sp : -1;
 
-  if (at_en.cterm_fg_color != 0 || at_en.cterm_bg_color != 0
-      || at_en.rgb_fg_color != -1 || at_en.rgb_bg_color != -1
-      || at_en.rgb_sp_color != -1 || at_en.cterm_ae_attr != 0
-      || at_en.rgb_ae_attr != 0) {
-    sgp->sg_attr = get_attr_entry(&at_en);
-  } else {
-    // If all the fields are cleared, clear the attr field back to default value
-    sgp->sg_attr = 0;
+  sgp->sg_attr = hl_get_syn_attr(idx+1, at_en);
+
+  // a cursor style uses this syn_id, make sure its atribute is updated.
+  if (cursor_mode_uses_syn_id(idx+1)) {
+    ui_mode_info_set();
   }
 }
 
-/*
- * Lookup a highlight group name and return it's ID.
- * If it is not found, 0 is returned.
- */
-int syn_name2id(char_u *name)
+/// Lookup a highlight group name and return its ID.
+///
+/// @param highlight name e.g. 'Cursor', 'Normal'
+/// @return the highlight id, else 0 if \p name does not exist
+int syn_name2id(const char_u *name)
 {
   int i;
   char_u name_u[200];
@@ -7126,7 +7276,7 @@ int syn_name2id(char_u *name)
 /*
  * Return TRUE if highlight group "name" exists.
  */
-int highlight_exists(char_u *name)
+int highlight_exists(const char_u *name)
 {
   return syn_name2id(name) > 0;
 }
@@ -7145,7 +7295,7 @@ char_u *syn_id2name(int id)
 /*
  * Like syn_name2id(), but take a pointer + length argument.
  */
-int syn_namen2id(char_u *linep, int len)
+int syn_namen2id(const char_u *linep, int len)
 {
   char_u *name = vim_strnsave(linep, len);
   int id = syn_name2id(name);
@@ -7154,13 +7304,14 @@ int syn_namen2id(char_u *linep, int len)
   return id;
 }
 
-/*
- * Find highlight group name in the table and return it's ID.
- * The argument is a pointer to the name and the length of the name.
- * If it doesn't exist yet, a new entry is created.
- * Return 0 for failure.
- */
-int syn_check_group(char_u *pp, int len)
+/// Find highlight group name in the table and return its ID.
+/// If it doesn't exist yet, a new entry is created.
+///
+/// @param pp Highlight group name
+/// @param len length of \p pp
+///
+/// @return 0 for failure else the id of the group
+int syn_check_group(const char_u *pp, int len)
 {
   char_u  *name = vim_strnsave(pp, len);
   int id = syn_name2id(name);
@@ -7172,11 +7323,11 @@ int syn_check_group(char_u *pp, int len)
   return id;
 }
 
-/*
- * Add new highlight group and return it's ID.
- * "name" must be an allocated string, it will be consumed.
- * Return 0 for failure.
- */
+/// Add new highlight group and return its ID.
+///
+/// @param name must be an allocated string, it will be consumed.
+/// @return 0 for failure, else the allocated group id
+/// @see syn_check_group syn_unadd_group
 static int syn_add_group(char_u *name)
 {
   char_u      *p;
@@ -7190,7 +7341,7 @@ static int syn_add_group(char_u *name)
     } else if (!ASCII_ISALNUM(*p) && *p != '_')   {
       /* This is an error, but since there previously was no check only
        * give a warning. */
-      msg_source(hl_attr(HLF_W));
+      msg_source(HL_ATTR(HLF_W));
       MSG(_("W18: Invalid character in group name"));
       break;
     }
@@ -7214,25 +7365,26 @@ static int syn_add_group(char_u *name)
   struct hl_group* hlgp = GA_APPEND_VIA_PTR(struct hl_group, &highlight_ga);
   memset(hlgp, 0, sizeof(*hlgp));
   hlgp->sg_name = name;
+  hlgp->sg_rgb_bg = -1;
+  hlgp->sg_rgb_fg = -1;
+  hlgp->sg_rgb_sp = -1;
   hlgp->sg_name_u = vim_strsave_up(name);
 
   return highlight_ga.ga_len;               /* ID is index plus one */
 }
 
-/*
- * When, just after calling syn_add_group(), an error is discovered, this
- * function deletes the new name.
- */
+/// When, just after calling syn_add_group(), an error is discovered, this
+/// function deletes the new name.
 static void syn_unadd_group(void)
 {
-  --highlight_ga.ga_len;
+  highlight_ga.ga_len--;
   xfree(HL_TABLE()[highlight_ga.ga_len].sg_name);
   xfree(HL_TABLE()[highlight_ga.ga_len].sg_name_u);
 }
 
-/*
- * Translate a group ID to highlight attributes.
- */
+
+/// Translate a group ID to highlight attributes.
+/// @see syn_attr2entry
 int syn_id2attr(int hl_id)
 {
   struct hl_group     *sgp;
@@ -7269,7 +7421,7 @@ int syn_get_final_id(int hl_id)
 }
 
 /// Refresh the color attributes of all highlight groups.
-static void highlight_attr_set_all(void)
+void highlight_attr_set_all(void)
 {
   for (int idx = 0; idx < highlight_ga.ga_len; idx++) {
     struct hl_group *sgp = &HL_TABLE()[idx];
@@ -7286,110 +7438,35 @@ static void highlight_attr_set_all(void)
   }
 }
 
-/*
- * Translate the 'highlight' option into attributes in highlight_attr[] and
- * set up the user highlights User1..9. A set of
- * corresponding highlights to use on top of HLF_SNC is computed.
- * Called only when the 'highlight' option has been changed and upon first
- * screen redraw after any :highlight command.
- * Return FAIL when an invalid flag is found in 'highlight'.  OK otherwise.
- */
-int highlight_changed(void)
+/// Tranlate highlight groups into attributes in highlight_attr[] and set up
+/// the user highlights User1..9. A set of corresponding highlights to use on
+/// top of HLF_SNC is computed.  Called only when nvim starts and upon first
+/// screen redraw after any :highlight command.
+void highlight_changed(void)
 {
-  int hlf;
-  int i;
-  char_u      *p;
-  int attr;
-  char_u      *end;
   int id;
   char_u userhl[10];
   int id_SNC = -1;
   int id_S = -1;
   int hlcnt;
-  static int hl_flags[HLF_COUNT] = HL_FLAGS;
 
   need_highlight_changed = FALSE;
 
-  /*
-   * Clear all attributes.
-   */
-  for (hlf = 0; hlf < (int)HLF_COUNT; ++hlf)
-    highlight_attr[hlf] = 0;
-
-  /*
-   * First set all attributes to their default value.
-   * Then use the attributes from the 'highlight' option.
-   */
-  for (i = 0; i < 2; ++i) {
-    if (i)
-      p = p_hl;
-    else
-      p = get_highlight_default();
-    if (p == NULL)          /* just in case */
-      continue;
-
-    while (*p) {
-      for (hlf = 0; hlf < (int)HLF_COUNT; ++hlf)
-        if (hl_flags[hlf] == *p)
-          break;
-      ++p;
-      if (hlf == (int)HLF_COUNT || *p == NUL)
-        return FAIL;
-
-      /*
-       * Allow several hl_flags to be combined, like "bu" for
-       * bold-underlined.
-       */
-      attr = 0;
-      bool colon = false;
-      for (; *p && *p != ','; ++p) {  // parse upto comma
-        if (ascii_iswhite(*p)) {  // ignore white space
-          continue;
-        }
-
-        if (colon)          /* Combination with ':' is not allowed. */
-          return FAIL;
-
-        switch (*p) {
-        case 'b':   attr |= HL_BOLD;
-          break;
-        case 'i':   attr |= HL_ITALIC;
-          break;
-        case '-':
-        case 'n':                                   /* no highlighting */
-          break;
-        case 'r':   attr |= HL_INVERSE;
-          break;
-        case 's':   attr |= HL_STANDOUT;
-          break;
-        case 'u':   attr |= HL_UNDERLINE;
-          break;
-        case 'c':   attr |= HL_UNDERCURL;
-          break;
-        case ':':   ++p;                            /* highlight group name */
-          if (attr || *p == NUL)                         /* no combinations */
-            return FAIL;
-          colon = true;
-          end = vim_strchr(p, ',');
-          if (end == NULL)
-            end = p + STRLEN(p);
-          id = syn_check_group(p, (int)(end - p));
-          if (id == 0)
-            return FAIL;
-          attr = syn_id2attr(id);
-          p = end - 1;
-          if (hlf == (int)HLF_SNC)
-            id_SNC = syn_get_final_id(id);
-          else if (hlf == (int)HLF_S)
-            id_S = syn_get_final_id(id);
-          break;
-        default:    return FAIL;
-        }
-      }
-      highlight_attr[hlf] = attr;
-
-      p = skip_to_option_part(p);           /* skip comma and spaces */
+  /// Translate builtin highlight groups into attributes for quick lookup.
+  for (int hlf = 0; hlf < (int)HLF_COUNT; hlf++) {
+    id = syn_check_group((char_u *)hlf_names[hlf], STRLEN(hlf_names[hlf]));
+    if (id == 0) {
+      abort();
     }
+    int final_id = syn_get_final_id(id);
+    if (hlf == (int)HLF_SNC) {
+      id_SNC = final_id;
+    } else if (hlf == (int)HLF_S) {
+      id_S = final_id;
+    }
+
+    highlight_attr[hlf] = hl_get_ui_attr(hlf, final_id,
+                                         hlf == (int)HLF_INACTIVE);
   }
 
   /* Setup the user highlights
@@ -7454,49 +7531,47 @@ int highlight_changed(void)
     }
   }
   highlight_ga.ga_len = hlcnt;
-
-  return OK;
 }
 
 
 /*
  * Handle command line completion for :highlight command.
  */
-void set_context_in_highlight_cmd(expand_T *xp, char_u *arg)
+void set_context_in_highlight_cmd(expand_T *xp, const char *arg)
 {
-  char_u      *p;
-
-  /* Default: expand group names */
+  // Default: expand group names.
   xp->xp_context = EXPAND_HIGHLIGHT;
-  xp->xp_pattern = arg;
+  xp->xp_pattern = (char_u *)arg;
   include_link = 2;
   include_default = 1;
 
   /* (part of) subcommand already typed */
   if (*arg != NUL) {
-    p = skiptowhite(arg);
-    if (*p != NUL) {                    /* past "default" or group name */
+    const char *p = (const char *)skiptowhite((const char_u *)arg);
+    if (*p != NUL) {  // Past "default" or group name.
       include_default = 0;
-      if (STRNCMP("default", arg, p - arg) == 0) {
-        arg = skipwhite(p);
-        xp->xp_pattern = arg;
-        p = skiptowhite(arg);
+      if (strncmp("default", arg, p - arg) == 0) {
+        arg = (const char *)skipwhite((const char_u *)p);
+        xp->xp_pattern = (char_u *)arg;
+        p = (const char *)skiptowhite((const char_u *)arg);
       }
       if (*p != NUL) {                          /* past group name */
         include_link = 0;
-        if (arg[1] == 'i' && arg[0] == 'N')
+        if (arg[1] == 'i' && arg[0] == 'N') {
           highlight_list();
-        if (STRNCMP("link", arg, p - arg) == 0
-            || STRNCMP("clear", arg, p - arg) == 0) {
-          xp->xp_pattern = skipwhite(p);
-          p = skiptowhite(xp->xp_pattern);
-          if (*p != NUL) {                      /* past first group name */
-            xp->xp_pattern = skipwhite(p);
-            p = skiptowhite(xp->xp_pattern);
+        }
+        if (strncmp("link", arg, p - arg) == 0
+            || strncmp("clear", arg, p - arg) == 0) {
+          xp->xp_pattern = skipwhite((const char_u *)p);
+          p = (const char *)skiptowhite(xp->xp_pattern);
+          if (*p != NUL) {  // Past first group name.
+            xp->xp_pattern = skipwhite((const char_u *)p);
+            p = (const char *)skiptowhite(xp->xp_pattern);
           }
         }
-        if (*p != NUL)                          /* past group name(s) */
+        if (*p != NUL) {  // Past group name(s).
           xp->xp_context = EXPAND_NOTHING;
+        }
       }
     }
   }
@@ -7509,728 +7584,754 @@ static void highlight_list(void)
 {
   int i;
 
-  for (i = 10; --i >= 0; )
-    highlight_list_two(i, hl_attr(HLF_D));
-  for (i = 40; --i >= 0; )
+  for (i = 10; --i >= 0; ) {
+    highlight_list_two(i, HL_ATTR(HLF_D));
+  }
+  for (i = 40; --i >= 0; ) {
     highlight_list_two(99, 0);
+  }
 }
 
 static void highlight_list_two(int cnt, int attr)
 {
-  msg_puts_attr((char_u *)&("N \bI \b!  \b"[cnt / 11]), attr);
+  msg_puts_attr(&("N \bI \b!  \b"[cnt / 11]), attr);
   msg_clr_eos();
   ui_flush();
   os_delay(cnt == 99 ? 40L : (long)cnt * 50L, false);
 }
 
 
-/*
- * Function given to ExpandGeneric() to obtain the list of group names.
- * Also used for synIDattr() function.
- */
-char_u *get_highlight_name(expand_T *xp, int idx)
+/// Function given to ExpandGeneric() to obtain the list of group names.
+const char *get_highlight_name(expand_T *const xp, int idx)
+  FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  //TODO: 'xp' is unused
-  if (idx == highlight_ga.ga_len && include_none != 0)
-    return (char_u *)"none";
-  if (idx == highlight_ga.ga_len + include_none && include_default != 0)
-    return (char_u *)"default";
-  if (idx == highlight_ga.ga_len + include_none + include_default
-      && include_link != 0)
-    return (char_u *)"link";
-  if (idx == highlight_ga.ga_len + include_none + include_default + 1
-      && include_link != 0)
-    return (char_u *)"clear";
-  if (idx < 0 || idx >= highlight_ga.ga_len)
+  return get_highlight_name_ext(xp, idx, true);
+}
+
+
+/// Obtain a highlight group name.
+/// When "skip_cleared" is TRUE don't return a cleared entry.
+const char *get_highlight_name_ext(expand_T *xp, int idx, int skip_cleared)
+  FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  if (idx < 0) {
     return NULL;
-  return HL_TABLE()[idx].sg_name;
+  }
+
+  // Items are never removed from the table, skip the ones that were cleared.
+  if (skip_cleared && idx < highlight_ga.ga_len && HL_TABLE()[idx].sg_cleared) {
+    return "";
+  }
+
+  if (idx == highlight_ga.ga_len && include_none != 0) {
+    return "none";
+  } else if (idx == highlight_ga.ga_len + include_none
+             && include_default != 0) {
+    return "default";
+  } else if (idx == highlight_ga.ga_len + include_none + include_default
+             && include_link != 0) {
+    return "link";
+  } else if (idx == highlight_ga.ga_len + include_none + include_default + 1
+             && include_link != 0) {
+    return "clear";
+  } else if (idx >= highlight_ga.ga_len) {
+    return NULL;
+  }
+  return (const char *)HL_TABLE()[idx].sg_name;
 }
 
 color_name_table_T color_name_table[] = {
   // Colors from rgb.txt
-  { "AliceBlue", RGB(0xf0, 0xf8, 0xff) },
-  { "AntiqueWhite", RGB(0xfa, 0xeb, 0xd7) },
-  { "AntiqueWhite1", RGB(0xff, 0xef, 0xdb) },
-  { "AntiqueWhite2", RGB(0xee, 0xdf, 0xcc) },
-  { "AntiqueWhite3", RGB(0xcd, 0xc0, 0xb0) },
-  { "AntiqueWhite4", RGB(0x8b, 0x83, 0x78) },
-  { "Aqua", RGB(0x00, 0xff, 0xff) },
-  { "Aquamarine", RGB(0x7f, 0xff, 0xd4) },
-  { "Aquamarine1", RGB(0x7f, 0xff, 0xd4) },
-  { "Aquamarine2", RGB(0x76, 0xee, 0xc6) },
-  { "Aquamarine3", RGB(0x66, 0xcd, 0xaa) },
-  { "Aquamarine4", RGB(0x45, 0x8b, 0x74) },
-  { "Azure", RGB(0xf0, 0xff, 0xff) },
-  { "Azure1", RGB(0xf0, 0xff, 0xff) },
-  { "Azure2", RGB(0xe0, 0xee, 0xee) },
-  { "Azure3", RGB(0xc1, 0xcd, 0xcd) },
-  { "Azure4", RGB(0x83, 0x8b, 0x8b) },
-  { "Beige", RGB(0xf5, 0xf5, 0xdc) },
-  { "Bisque", RGB(0xff, 0xe4, 0xc4) },
-  { "Bisque1", RGB(0xff, 0xe4, 0xc4) },
-  { "Bisque2", RGB(0xee, 0xd5, 0xb7) },
-  { "Bisque3", RGB(0xcd, 0xb7, 0x9e) },
-  { "Bisque4", RGB(0x8b, 0x7d, 0x6b) },
-  { "Black", RGB(0x00, 0x00, 0x00) },
-  { "BlanchedAlmond", RGB(0xff, 0xeb, 0xcd) },
-  { "Blue", RGB(0x00, 0x00, 0xff) },
-  { "Blue1", RGB(0x0, 0x0, 0xff) },
-  { "Blue2", RGB(0x0, 0x0, 0xee) },
-  { "Blue3", RGB(0x0, 0x0, 0xcd) },
-  { "Blue4", RGB(0x0, 0x0, 0x8b) },
-  { "BlueViolet", RGB(0x8a, 0x2b, 0xe2) },
-  { "Brown", RGB(0xa5, 0x2a, 0x2a) },
-  { "Brown1", RGB(0xff, 0x40, 0x40) },
-  { "Brown2", RGB(0xee, 0x3b, 0x3b) },
-  { "Brown3", RGB(0xcd, 0x33, 0x33) },
-  { "Brown4", RGB(0x8b, 0x23, 0x23) },
-  { "BurlyWood", RGB(0xde, 0xb8, 0x87) },
-  { "Burlywood1", RGB(0xff, 0xd3, 0x9b) },
-  { "Burlywood2", RGB(0xee, 0xc5, 0x91) },
-  { "Burlywood3", RGB(0xcd, 0xaa, 0x7d) },
-  { "Burlywood4", RGB(0x8b, 0x73, 0x55) },
-  { "CadetBlue", RGB(0x5f, 0x9e, 0xa0) },
-  { "CadetBlue1", RGB(0x98, 0xf5, 0xff) },
-  { "CadetBlue2", RGB(0x8e, 0xe5, 0xee) },
-  { "CadetBlue3", RGB(0x7a, 0xc5, 0xcd) },
-  { "CadetBlue4", RGB(0x53, 0x86, 0x8b) },
-  { "ChartReuse", RGB(0x7f, 0xff, 0x00) },
-  { "Chartreuse1", RGB(0x7f, 0xff, 0x0) },
-  { "Chartreuse2", RGB(0x76, 0xee, 0x0) },
-  { "Chartreuse3", RGB(0x66, 0xcd, 0x0) },
-  { "Chartreuse4", RGB(0x45, 0x8b, 0x0) },
-  { "Chocolate", RGB(0xd2, 0x69, 0x1e) },
-  { "Chocolate1", RGB(0xff, 0x7f, 0x24) },
-  { "Chocolate2", RGB(0xee, 0x76, 0x21) },
-  { "Chocolate3", RGB(0xcd, 0x66, 0x1d) },
-  { "Chocolate4", RGB(0x8b, 0x45, 0x13) },
-  { "Coral", RGB(0xff, 0x7f, 0x50) },
-  { "Coral1", RGB(0xff, 0x72, 0x56) },
-  { "Coral2", RGB(0xee, 0x6a, 0x50) },
-  { "Coral3", RGB(0xcd, 0x5b, 0x45) },
-  { "Coral4", RGB(0x8b, 0x3e, 0x2f) },
-  { "CornFlowerBlue", RGB(0x64, 0x95, 0xed) },
-  { "Cornsilk", RGB(0xff, 0xf8, 0xdc) },
-  { "Cornsilk1", RGB(0xff, 0xf8, 0xdc) },
-  { "Cornsilk2", RGB(0xee, 0xe8, 0xcd) },
-  { "Cornsilk3", RGB(0xcd, 0xc8, 0xb1) },
-  { "Cornsilk4", RGB(0x8b, 0x88, 0x78) },
-  { "Crimson", RGB(0xdc, 0x14, 0x3c) },
-  { "Cyan", RGB(0x00, 0xff, 0xff) },
-  { "Cyan1", RGB(0x0, 0xff, 0xff) },
-  { "Cyan2", RGB(0x0, 0xee, 0xee) },
-  { "Cyan3", RGB(0x0, 0xcd, 0xcd) },
-  { "Cyan4", RGB(0x0, 0x8b, 0x8b) },
-  { "DarkBlue", RGB(0x00, 0x00, 0x8b) },
-  { "DarkCyan", RGB(0x00, 0x8b, 0x8b) },
-  { "DarkGoldenRod", RGB(0xb8, 0x86, 0x0b) },
-  { "DarkGoldenrod1", RGB(0xff, 0xb9, 0xf) },
-  { "DarkGoldenrod2", RGB(0xee, 0xad, 0xe) },
-  { "DarkGoldenrod3", RGB(0xcd, 0x95, 0xc) },
-  { "DarkGoldenrod4", RGB(0x8b, 0x65, 0x8) },
-  { "DarkGray", RGB(0xa9, 0xa9, 0xa9) },
-  { "DarkGreen", RGB(0x00, 0x64, 0x00) },
-  { "DarkGrey", RGB(0xa9, 0xa9, 0xa9) },
-  { "DarkKhaki", RGB(0xbd, 0xb7, 0x6b) },
-  { "DarkMagenta", RGB(0x8b, 0x00, 0x8b) },
-  { "DarkOliveGreen", RGB(0x55, 0x6b, 0x2f) },
-  { "DarkOliveGreen1", RGB(0xca, 0xff, 0x70) },
-  { "DarkOliveGreen2", RGB(0xbc, 0xee, 0x68) },
-  { "DarkOliveGreen3", RGB(0xa2, 0xcd, 0x5a) },
-  { "DarkOliveGreen4", RGB(0x6e, 0x8b, 0x3d) },
-  { "DarkOrange", RGB(0xff, 0x8c, 0x00) },
-  { "DarkOrange1", RGB(0xff, 0x7f, 0x0) },
-  { "DarkOrange2", RGB(0xee, 0x76, 0x0) },
-  { "DarkOrange3", RGB(0xcd, 0x66, 0x0) },
-  { "DarkOrange4", RGB(0x8b, 0x45, 0x0) },
-  { "DarkOrchid", RGB(0x99, 0x32, 0xcc) },
-  { "DarkOrchid1", RGB(0xbf, 0x3e, 0xff) },
-  { "DarkOrchid2", RGB(0xb2, 0x3a, 0xee) },
-  { "DarkOrchid3", RGB(0x9a, 0x32, 0xcd) },
-  { "DarkOrchid4", RGB(0x68, 0x22, 0x8b) },
-  { "DarkRed", RGB(0x8b, 0x00, 0x00) },
-  { "DarkSalmon", RGB(0xe9, 0x96, 0x7a) },
-  { "DarkSeaGreen", RGB(0x8f, 0xbc, 0x8f) },
-  { "DarkSeaGreen1", RGB(0xc1, 0xff, 0xc1) },
-  { "DarkSeaGreen2", RGB(0xb4, 0xee, 0xb4) },
-  { "DarkSeaGreen3", RGB(0x9b, 0xcd, 0x9b) },
-  { "DarkSeaGreen4", RGB(0x69, 0x8b, 0x69) },
-  { "DarkSlateBlue", RGB(0x48, 0x3d, 0x8b) },
-  { "DarkSlateGray", RGB(0x2f, 0x4f, 0x4f) },
-  { "DarkSlateGray1", RGB(0x97, 0xff, 0xff) },
-  { "DarkSlateGray2", RGB(0x8d, 0xee, 0xee) },
-  { "DarkSlateGray3", RGB(0x79, 0xcd, 0xcd) },
-  { "DarkSlateGray4", RGB(0x52, 0x8b, 0x8b) },
-  { "DarkSlateGrey", RGB(0x2f, 0x4f, 0x4f) },
-  { "DarkTurquoise", RGB(0x00, 0xce, 0xd1) },
-  { "DarkViolet", RGB(0x94, 0x00, 0xd3) },
-  { "DarkYellow", RGB(0xbb, 0xbb, 0x00) },
-  { "DeepPink", RGB(0xff, 0x14, 0x93) },
-  { "DeepPink1", RGB(0xff, 0x14, 0x93) },
-  { "DeepPink2", RGB(0xee, 0x12, 0x89) },
-  { "DeepPink3", RGB(0xcd, 0x10, 0x76) },
-  { "DeepPink4", RGB(0x8b, 0xa, 0x50) },
-  { "DeepSkyBlue", RGB(0x00, 0xbf, 0xff) },
-  { "DeepSkyBlue1", RGB(0x0, 0xbf, 0xff) },
-  { "DeepSkyBlue2", RGB(0x0, 0xb2, 0xee) },
-  { "DeepSkyBlue3", RGB(0x0, 0x9a, 0xcd) },
-  { "DeepSkyBlue4", RGB(0x0, 0x68, 0x8b) },
-  { "DimGray", RGB(0x69, 0x69, 0x69) },
-  { "DimGrey", RGB(0x69, 0x69, 0x69) },
-  { "DodgerBlue", RGB(0x1e, 0x90, 0xff) },
-  { "DodgerBlue1", RGB(0x1e, 0x90, 0xff) },
-  { "DodgerBlue2", RGB(0x1c, 0x86, 0xee) },
-  { "DodgerBlue3", RGB(0x18, 0x74, 0xcd) },
-  { "DodgerBlue4", RGB(0x10, 0x4e, 0x8b) },
-  { "Firebrick", RGB(0xb2, 0x22, 0x22) },
-  { "Firebrick1", RGB(0xff, 0x30, 0x30) },
-  { "Firebrick2", RGB(0xee, 0x2c, 0x2c) },
-  { "Firebrick3", RGB(0xcd, 0x26, 0x26) },
-  { "Firebrick4", RGB(0x8b, 0x1a, 0x1a) },
-  { "FloralWhite", RGB(0xff, 0xfa, 0xf0) },
-  { "ForestGreen", RGB(0x22, 0x8b, 0x22) },
-  { "Fuchsia", RGB(0xff, 0x00, 0xff) },
-  { "Gainsboro", RGB(0xdc, 0xdc, 0xdc) },
-  { "GhostWhite", RGB(0xf8, 0xf8, 0xff) },
-  { "Gold", RGB(0xff, 0xd7, 0x00) },
-  { "Gold1", RGB(0xff, 0xd7, 0x0) },
-  { "Gold2", RGB(0xee, 0xc9, 0x0) },
-  { "Gold3", RGB(0xcd, 0xad, 0x0) },
-  { "Gold4", RGB(0x8b, 0x75, 0x0) },
-  { "GoldenRod", RGB(0xda, 0xa5, 0x20) },
-  { "Goldenrod1", RGB(0xff, 0xc1, 0x25) },
-  { "Goldenrod2", RGB(0xee, 0xb4, 0x22) },
-  { "Goldenrod3", RGB(0xcd, 0x9b, 0x1d) },
-  { "Goldenrod4", RGB(0x8b, 0x69, 0x14) },
-  { "Gray", RGB(0x80, 0x80, 0x80) },
-  { "Gray0", RGB(0x0, 0x0, 0x0) },
-  { "Gray1", RGB(0x3, 0x3, 0x3) },
-  { "Gray10", RGB(0x1a, 0x1a, 0x1a) },
-  { "Gray100", RGB(0xff, 0xff, 0xff) },
-  { "Gray11", RGB(0x1c, 0x1c, 0x1c) },
-  { "Gray12", RGB(0x1f, 0x1f, 0x1f) },
-  { "Gray13", RGB(0x21, 0x21, 0x21) },
-  { "Gray14", RGB(0x24, 0x24, 0x24) },
-  { "Gray15", RGB(0x26, 0x26, 0x26) },
-  { "Gray16", RGB(0x29, 0x29, 0x29) },
-  { "Gray17", RGB(0x2b, 0x2b, 0x2b) },
-  { "Gray18", RGB(0x2e, 0x2e, 0x2e) },
-  { "Gray19", RGB(0x30, 0x30, 0x30) },
-  { "Gray2", RGB(0x5, 0x5, 0x5) },
-  { "Gray20", RGB(0x33, 0x33, 0x33) },
-  { "Gray21", RGB(0x36, 0x36, 0x36) },
-  { "Gray22", RGB(0x38, 0x38, 0x38) },
-  { "Gray23", RGB(0x3b, 0x3b, 0x3b) },
-  { "Gray24", RGB(0x3d, 0x3d, 0x3d) },
-  { "Gray25", RGB(0x40, 0x40, 0x40) },
-  { "Gray26", RGB(0x42, 0x42, 0x42) },
-  { "Gray27", RGB(0x45, 0x45, 0x45) },
-  { "Gray28", RGB(0x47, 0x47, 0x47) },
-  { "Gray29", RGB(0x4a, 0x4a, 0x4a) },
-  { "Gray3", RGB(0x8, 0x8, 0x8) },
-  { "Gray30", RGB(0x4d, 0x4d, 0x4d) },
-  { "Gray31", RGB(0x4f, 0x4f, 0x4f) },
-  { "Gray32", RGB(0x52, 0x52, 0x52) },
-  { "Gray33", RGB(0x54, 0x54, 0x54) },
-  { "Gray34", RGB(0x57, 0x57, 0x57) },
-  { "Gray35", RGB(0x59, 0x59, 0x59) },
-  { "Gray36", RGB(0x5c, 0x5c, 0x5c) },
-  { "Gray37", RGB(0x5e, 0x5e, 0x5e) },
-  { "Gray38", RGB(0x61, 0x61, 0x61) },
-  { "Gray39", RGB(0x63, 0x63, 0x63) },
-  { "Gray4", RGB(0xa, 0xa, 0xa) },
-  { "Gray40", RGB(0x66, 0x66, 0x66) },
-  { "Gray41", RGB(0x69, 0x69, 0x69) },
-  { "Gray42", RGB(0x6b, 0x6b, 0x6b) },
-  { "Gray43", RGB(0x6e, 0x6e, 0x6e) },
-  { "Gray44", RGB(0x70, 0x70, 0x70) },
-  { "Gray45", RGB(0x73, 0x73, 0x73) },
-  { "Gray46", RGB(0x75, 0x75, 0x75) },
-  { "Gray47", RGB(0x78, 0x78, 0x78) },
-  { "Gray48", RGB(0x7a, 0x7a, 0x7a) },
-  { "Gray49", RGB(0x7d, 0x7d, 0x7d) },
-  { "Gray5", RGB(0xd, 0xd, 0xd) },
-  { "Gray50", RGB(0x7f, 0x7f, 0x7f) },
-  { "Gray51", RGB(0x82, 0x82, 0x82) },
-  { "Gray52", RGB(0x85, 0x85, 0x85) },
-  { "Gray53", RGB(0x87, 0x87, 0x87) },
-  { "Gray54", RGB(0x8a, 0x8a, 0x8a) },
-  { "Gray55", RGB(0x8c, 0x8c, 0x8c) },
-  { "Gray56", RGB(0x8f, 0x8f, 0x8f) },
-  { "Gray57", RGB(0x91, 0x91, 0x91) },
-  { "Gray58", RGB(0x94, 0x94, 0x94) },
-  { "Gray59", RGB(0x96, 0x96, 0x96) },
-  { "Gray6", RGB(0xf, 0xf, 0xf) },
-  { "Gray60", RGB(0x99, 0x99, 0x99) },
-  { "Gray61", RGB(0x9c, 0x9c, 0x9c) },
-  { "Gray62", RGB(0x9e, 0x9e, 0x9e) },
-  { "Gray63", RGB(0xa1, 0xa1, 0xa1) },
-  { "Gray64", RGB(0xa3, 0xa3, 0xa3) },
-  { "Gray65", RGB(0xa6, 0xa6, 0xa6) },
-  { "Gray66", RGB(0xa8, 0xa8, 0xa8) },
-  { "Gray67", RGB(0xab, 0xab, 0xab) },
-  { "Gray68", RGB(0xad, 0xad, 0xad) },
-  { "Gray69", RGB(0xb0, 0xb0, 0xb0) },
-  { "Gray7", RGB(0x12, 0x12, 0x12) },
-  { "Gray70", RGB(0xb3, 0xb3, 0xb3) },
-  { "Gray71", RGB(0xb5, 0xb5, 0xb5) },
-  { "Gray72", RGB(0xb8, 0xb8, 0xb8) },
-  { "Gray73", RGB(0xba, 0xba, 0xba) },
-  { "Gray74", RGB(0xbd, 0xbd, 0xbd) },
-  { "Gray75", RGB(0xbf, 0xbf, 0xbf) },
-  { "Gray76", RGB(0xc2, 0xc2, 0xc2) },
-  { "Gray77", RGB(0xc4, 0xc4, 0xc4) },
-  { "Gray78", RGB(0xc7, 0xc7, 0xc7) },
-  { "Gray79", RGB(0xc9, 0xc9, 0xc9) },
-  { "Gray8", RGB(0x14, 0x14, 0x14) },
-  { "Gray80", RGB(0xcc, 0xcc, 0xcc) },
-  { "Gray81", RGB(0xcf, 0xcf, 0xcf) },
-  { "Gray82", RGB(0xd1, 0xd1, 0xd1) },
-  { "Gray83", RGB(0xd4, 0xd4, 0xd4) },
-  { "Gray84", RGB(0xd6, 0xd6, 0xd6) },
-  { "Gray85", RGB(0xd9, 0xd9, 0xd9) },
-  { "Gray86", RGB(0xdb, 0xdb, 0xdb) },
-  { "Gray87", RGB(0xde, 0xde, 0xde) },
-  { "Gray88", RGB(0xe0, 0xe0, 0xe0) },
-  { "Gray89", RGB(0xe3, 0xe3, 0xe3) },
-  { "Gray9", RGB(0x17, 0x17, 0x17) },
-  { "Gray90", RGB(0xe5, 0xe5, 0xe5) },
-  { "Gray91", RGB(0xe8, 0xe8, 0xe8) },
-  { "Gray92", RGB(0xeb, 0xeb, 0xeb) },
-  { "Gray93", RGB(0xed, 0xed, 0xed) },
-  { "Gray94", RGB(0xf0, 0xf0, 0xf0) },
-  { "Gray95", RGB(0xf2, 0xf2, 0xf2) },
-  { "Gray96", RGB(0xf5, 0xf5, 0xf5) },
-  { "Gray97", RGB(0xf7, 0xf7, 0xf7) },
-  { "Gray98", RGB(0xfa, 0xfa, 0xfa) },
-  { "Gray99", RGB(0xfc, 0xfc, 0xfc) },
-  { "Green", RGB(0x00, 0x80, 0x00) },
-  { "Green1", RGB(0x0, 0xff, 0x0) },
-  { "Green2", RGB(0x0, 0xee, 0x0) },
-  { "Green3", RGB(0x0, 0xcd, 0x0) },
-  { "Green4", RGB(0x0, 0x8b, 0x0) },
-  { "GreenYellow", RGB(0xad, 0xff, 0x2f) },
-  { "Grey", RGB(0x80, 0x80, 0x80) },
-  { "Grey0", RGB(0x0, 0x0, 0x0) },
-  { "Grey1", RGB(0x3, 0x3, 0x3) },
-  { "Grey10", RGB(0x1a, 0x1a, 0x1a) },
-  { "Grey100", RGB(0xff, 0xff, 0xff) },
-  { "Grey11", RGB(0x1c, 0x1c, 0x1c) },
-  { "Grey12", RGB(0x1f, 0x1f, 0x1f) },
-  { "Grey13", RGB(0x21, 0x21, 0x21) },
-  { "Grey14", RGB(0x24, 0x24, 0x24) },
-  { "Grey15", RGB(0x26, 0x26, 0x26) },
-  { "Grey16", RGB(0x29, 0x29, 0x29) },
-  { "Grey17", RGB(0x2b, 0x2b, 0x2b) },
-  { "Grey18", RGB(0x2e, 0x2e, 0x2e) },
-  { "Grey19", RGB(0x30, 0x30, 0x30) },
-  { "Grey2", RGB(0x5, 0x5, 0x5) },
-  { "Grey20", RGB(0x33, 0x33, 0x33) },
-  { "Grey21", RGB(0x36, 0x36, 0x36) },
-  { "Grey22", RGB(0x38, 0x38, 0x38) },
-  { "Grey23", RGB(0x3b, 0x3b, 0x3b) },
-  { "Grey24", RGB(0x3d, 0x3d, 0x3d) },
-  { "Grey25", RGB(0x40, 0x40, 0x40) },
-  { "Grey26", RGB(0x42, 0x42, 0x42) },
-  { "Grey27", RGB(0x45, 0x45, 0x45) },
-  { "Grey28", RGB(0x47, 0x47, 0x47) },
-  { "Grey29", RGB(0x4a, 0x4a, 0x4a) },
-  { "Grey3", RGB(0x8, 0x8, 0x8) },
-  { "Grey30", RGB(0x4d, 0x4d, 0x4d) },
-  { "Grey31", RGB(0x4f, 0x4f, 0x4f) },
-  { "Grey32", RGB(0x52, 0x52, 0x52) },
-  { "Grey33", RGB(0x54, 0x54, 0x54) },
-  { "Grey34", RGB(0x57, 0x57, 0x57) },
-  { "Grey35", RGB(0x59, 0x59, 0x59) },
-  { "Grey36", RGB(0x5c, 0x5c, 0x5c) },
-  { "Grey37", RGB(0x5e, 0x5e, 0x5e) },
-  { "Grey38", RGB(0x61, 0x61, 0x61) },
-  { "Grey39", RGB(0x63, 0x63, 0x63) },
-  { "Grey4", RGB(0xa, 0xa, 0xa) },
-  { "Grey40", RGB(0x66, 0x66, 0x66) },
-  { "Grey41", RGB(0x69, 0x69, 0x69) },
-  { "Grey42", RGB(0x6b, 0x6b, 0x6b) },
-  { "Grey43", RGB(0x6e, 0x6e, 0x6e) },
-  { "Grey44", RGB(0x70, 0x70, 0x70) },
-  { "Grey45", RGB(0x73, 0x73, 0x73) },
-  { "Grey46", RGB(0x75, 0x75, 0x75) },
-  { "Grey47", RGB(0x78, 0x78, 0x78) },
-  { "Grey48", RGB(0x7a, 0x7a, 0x7a) },
-  { "Grey49", RGB(0x7d, 0x7d, 0x7d) },
-  { "Grey5", RGB(0xd, 0xd, 0xd) },
-  { "Grey50", RGB(0x7f, 0x7f, 0x7f) },
-  { "Grey51", RGB(0x82, 0x82, 0x82) },
-  { "Grey52", RGB(0x85, 0x85, 0x85) },
-  { "Grey53", RGB(0x87, 0x87, 0x87) },
-  { "Grey54", RGB(0x8a, 0x8a, 0x8a) },
-  { "Grey55", RGB(0x8c, 0x8c, 0x8c) },
-  { "Grey56", RGB(0x8f, 0x8f, 0x8f) },
-  { "Grey57", RGB(0x91, 0x91, 0x91) },
-  { "Grey58", RGB(0x94, 0x94, 0x94) },
-  { "Grey59", RGB(0x96, 0x96, 0x96) },
-  { "Grey6", RGB(0xf, 0xf, 0xf) },
-  { "Grey60", RGB(0x99, 0x99, 0x99) },
-  { "Grey61", RGB(0x9c, 0x9c, 0x9c) },
-  { "Grey62", RGB(0x9e, 0x9e, 0x9e) },
-  { "Grey63", RGB(0xa1, 0xa1, 0xa1) },
-  { "Grey64", RGB(0xa3, 0xa3, 0xa3) },
-  { "Grey65", RGB(0xa6, 0xa6, 0xa6) },
-  { "Grey66", RGB(0xa8, 0xa8, 0xa8) },
-  { "Grey67", RGB(0xab, 0xab, 0xab) },
-  { "Grey68", RGB(0xad, 0xad, 0xad) },
-  { "Grey69", RGB(0xb0, 0xb0, 0xb0) },
-  { "Grey7", RGB(0x12, 0x12, 0x12) },
-  { "Grey70", RGB(0xb3, 0xb3, 0xb3) },
-  { "Grey71", RGB(0xb5, 0xb5, 0xb5) },
-  { "Grey72", RGB(0xb8, 0xb8, 0xb8) },
-  { "Grey73", RGB(0xba, 0xba, 0xba) },
-  { "Grey74", RGB(0xbd, 0xbd, 0xbd) },
-  { "Grey75", RGB(0xbf, 0xbf, 0xbf) },
-  { "Grey76", RGB(0xc2, 0xc2, 0xc2) },
-  { "Grey77", RGB(0xc4, 0xc4, 0xc4) },
-  { "Grey78", RGB(0xc7, 0xc7, 0xc7) },
-  { "Grey79", RGB(0xc9, 0xc9, 0xc9) },
-  { "Grey8", RGB(0x14, 0x14, 0x14) },
-  { "Grey80", RGB(0xcc, 0xcc, 0xcc) },
-  { "Grey81", RGB(0xcf, 0xcf, 0xcf) },
-  { "Grey82", RGB(0xd1, 0xd1, 0xd1) },
-  { "Grey83", RGB(0xd4, 0xd4, 0xd4) },
-  { "Grey84", RGB(0xd6, 0xd6, 0xd6) },
-  { "Grey85", RGB(0xd9, 0xd9, 0xd9) },
-  { "Grey86", RGB(0xdb, 0xdb, 0xdb) },
-  { "Grey87", RGB(0xde, 0xde, 0xde) },
-  { "Grey88", RGB(0xe0, 0xe0, 0xe0) },
-  { "Grey89", RGB(0xe3, 0xe3, 0xe3) },
-  { "Grey9", RGB(0x17, 0x17, 0x17) },
-  { "Grey90", RGB(0xe5, 0xe5, 0xe5) },
-  { "Grey91", RGB(0xe8, 0xe8, 0xe8) },
-  { "Grey92", RGB(0xeb, 0xeb, 0xeb) },
-  { "Grey93", RGB(0xed, 0xed, 0xed) },
-  { "Grey94", RGB(0xf0, 0xf0, 0xf0) },
-  { "Grey95", RGB(0xf2, 0xf2, 0xf2) },
-  { "Grey96", RGB(0xf5, 0xf5, 0xf5) },
-  { "Grey97", RGB(0xf7, 0xf7, 0xf7) },
-  { "Grey98", RGB(0xfa, 0xfa, 0xfa) },
-  { "Grey99", RGB(0xfc, 0xfc, 0xfc) },
-  { "Honeydew", RGB(0xf0, 0xff, 0xf0) },
-  { "Honeydew1", RGB(0xf0, 0xff, 0xf0) },
-  { "Honeydew2", RGB(0xe0, 0xee, 0xe0) },
-  { "Honeydew3", RGB(0xc1, 0xcd, 0xc1) },
-  { "Honeydew4", RGB(0x83, 0x8b, 0x83) },
-  { "HotPink", RGB(0xff, 0x69, 0xb4) },
-  { "HotPink1", RGB(0xff, 0x6e, 0xb4) },
-  { "HotPink2", RGB(0xee, 0x6a, 0xa7) },
-  { "HotPink3", RGB(0xcd, 0x60, 0x90) },
-  { "HotPink4", RGB(0x8b, 0x3a, 0x62) },
-  { "IndianRed", RGB(0xcd, 0x5c, 0x5c) },
-  { "IndianRed1", RGB(0xff, 0x6a, 0x6a) },
-  { "IndianRed2", RGB(0xee, 0x63, 0x63) },
-  { "IndianRed3", RGB(0xcd, 0x55, 0x55) },
-  { "IndianRed4", RGB(0x8b, 0x3a, 0x3a) },
-  { "Indigo", RGB(0x4b, 0x00, 0x82) },
-  { "Ivory", RGB(0xff, 0xff, 0xf0) },
-  { "Ivory1", RGB(0xff, 0xff, 0xf0) },
-  { "Ivory2", RGB(0xee, 0xee, 0xe0) },
-  { "Ivory3", RGB(0xcd, 0xcd, 0xc1) },
-  { "Ivory4", RGB(0x8b, 0x8b, 0x83) },
-  { "Khaki", RGB(0xf0, 0xe6, 0x8c) },
-  { "Khaki1", RGB(0xff, 0xf6, 0x8f) },
-  { "Khaki2", RGB(0xee, 0xe6, 0x85) },
-  { "Khaki3", RGB(0xcd, 0xc6, 0x73) },
-  { "Khaki4", RGB(0x8b, 0x86, 0x4e) },
-  { "Lavender", RGB(0xe6, 0xe6, 0xfa) },
-  { "LavenderBlush", RGB(0xff, 0xf0, 0xf5) },
-  { "LavenderBlush1", RGB(0xff, 0xf0, 0xf5) },
-  { "LavenderBlush2", RGB(0xee, 0xe0, 0xe5) },
-  { "LavenderBlush3", RGB(0xcd, 0xc1, 0xc5) },
-  { "LavenderBlush4", RGB(0x8b, 0x83, 0x86) },
-  { "LawnGreen", RGB(0x7c, 0xfc, 0x00) },
-  { "LemonChiffon", RGB(0xff, 0xfa, 0xcd) },
-  { "LemonChiffon1", RGB(0xff, 0xfa, 0xcd) },
-  { "LemonChiffon2", RGB(0xee, 0xe9, 0xbf) },
-  { "LemonChiffon3", RGB(0xcd, 0xc9, 0xa5) },
-  { "LemonChiffon4", RGB(0x8b, 0x89, 0x70) },
-  { "LightBlue", RGB(0xad, 0xd8, 0xe6) },
-  { "LightBlue1", RGB(0xbf, 0xef, 0xff) },
-  { "LightBlue2", RGB(0xb2, 0xdf, 0xee) },
-  { "LightBlue3", RGB(0x9a, 0xc0, 0xcd) },
-  { "LightBlue4", RGB(0x68, 0x83, 0x8b) },
-  { "LightCoral", RGB(0xf0, 0x80, 0x80) },
-  { "LightCyan", RGB(0xe0, 0xff, 0xff) },
-  { "LightCyan1", RGB(0xe0, 0xff, 0xff) },
-  { "LightCyan2", RGB(0xd1, 0xee, 0xee) },
-  { "LightCyan3", RGB(0xb4, 0xcd, 0xcd) },
-  { "LightCyan4", RGB(0x7a, 0x8b, 0x8b) },
-  { "LightGoldenrod", RGB(0xee, 0xdd, 0x82) },
-  { "LightGoldenrod1", RGB(0xff, 0xec, 0x8b) },
-  { "LightGoldenrod2", RGB(0xee, 0xdc, 0x82) },
-  { "LightGoldenrod3", RGB(0xcd, 0xbe, 0x70) },
-  { "LightGoldenrod4", RGB(0x8b, 0x81, 0x4c) },
-  { "LightGoldenRodYellow", RGB(0xfa, 0xfa, 0xd2) },
-  { "LightGray", RGB(0xd3, 0xd3, 0xd3) },
-  { "LightGreen", RGB(0x90, 0xee, 0x90) },
-  { "LightGrey", RGB(0xd3, 0xd3, 0xd3) },
-  { "LightMagenta", RGB(0xff, 0xbb, 0xff) },
-  { "LightPink", RGB(0xff, 0xb6, 0xc1) },
-  { "LightPink1", RGB(0xff, 0xae, 0xb9) },
-  { "LightPink2", RGB(0xee, 0xa2, 0xad) },
-  { "LightPink3", RGB(0xcd, 0x8c, 0x95) },
-  { "LightPink4", RGB(0x8b, 0x5f, 0x65) },
-  { "LightRed", RGB(0xff, 0xbb, 0xbb) },
-  { "LightSalmon", RGB(0xff, 0xa0, 0x7a) },
-  { "LightSalmon1", RGB(0xff, 0xa0, 0x7a) },
-  { "LightSalmon2", RGB(0xee, 0x95, 0x72) },
-  { "LightSalmon3", RGB(0xcd, 0x81, 0x62) },
-  { "LightSalmon4", RGB(0x8b, 0x57, 0x42) },
-  { "LightSeaGreen", RGB(0x20, 0xb2, 0xaa) },
-  { "LightSkyBlue", RGB(0x87, 0xce, 0xfa) },
-  { "LightSkyBlue1", RGB(0xb0, 0xe2, 0xff) },
-  { "LightSkyBlue2", RGB(0xa4, 0xd3, 0xee) },
-  { "LightSkyBlue3", RGB(0x8d, 0xb6, 0xcd) },
-  { "LightSkyBlue4", RGB(0x60, 0x7b, 0x8b) },
-  { "LightSlateBlue", RGB(0x84, 0x70, 0xff) },
-  { "LightSlateGray", RGB(0x77, 0x88, 0x99) },
-  { "LightSlateGrey", RGB(0x77, 0x88, 0x99) },
-  { "LightSteelBlue", RGB(0xb0, 0xc4, 0xde) },
-  { "LightSteelBlue1", RGB(0xca, 0xe1, 0xff) },
-  { "LightSteelBlue2", RGB(0xbc, 0xd2, 0xee) },
-  { "LightSteelBlue3", RGB(0xa2, 0xb5, 0xcd) },
-  { "LightSteelBlue4", RGB(0x6e, 0x7b, 0x8b) },
-  { "LightYellow", RGB(0xff, 0xff, 0xe0) },
-  { "LightYellow1", RGB(0xff, 0xff, 0xe0) },
-  { "LightYellow2", RGB(0xee, 0xee, 0xd1) },
-  { "LightYellow3", RGB(0xcd, 0xcd, 0xb4) },
-  { "LightYellow4", RGB(0x8b, 0x8b, 0x7a) },
-  { "Lime", RGB(0x00, 0xff, 0x00) },
-  { "LimeGreen", RGB(0x32, 0xcd, 0x32) },
-  { "Linen", RGB(0xfa, 0xf0, 0xe6) },
-  { "Magenta", RGB(0xff, 0x00, 0xff) },
-  { "Magenta1", RGB(0xff, 0x0, 0xff) },
-  { "Magenta2", RGB(0xee, 0x0, 0xee) },
-  { "Magenta3", RGB(0xcd, 0x0, 0xcd) },
-  { "Magenta4", RGB(0x8b, 0x0, 0x8b) },
-  { "Maroon", RGB(0x80, 0x00, 0x00) },
-  { "Maroon1", RGB(0xff, 0x34, 0xb3) },
-  { "Maroon2", RGB(0xee, 0x30, 0xa7) },
-  { "Maroon3", RGB(0xcd, 0x29, 0x90) },
-  { "Maroon4", RGB(0x8b, 0x1c, 0x62) },
-  { "MediumAquamarine", RGB(0x66, 0xcd, 0xaa) },
-  { "MediumBlue", RGB(0x00, 0x00, 0xcd) },
-  { "MediumOrchid", RGB(0xba, 0x55, 0xd3) },
-  { "MediumOrchid1", RGB(0xe0, 0x66, 0xff) },
-  { "MediumOrchid2", RGB(0xd1, 0x5f, 0xee) },
-  { "MediumOrchid3", RGB(0xb4, 0x52, 0xcd) },
-  { "MediumOrchid4", RGB(0x7a, 0x37, 0x8b) },
-  { "MediumPurple", RGB(0x93, 0x70, 0xdb) },
-  { "MediumPurple1", RGB(0xab, 0x82, 0xff) },
-  { "MediumPurple2", RGB(0x9f, 0x79, 0xee) },
-  { "MediumPurple3", RGB(0x89, 0x68, 0xcd) },
-  { "MediumPurple4", RGB(0x5d, 0x47, 0x8b) },
-  { "MediumSeaGreen", RGB(0x3c, 0xb3, 0x71) },
-  { "MediumSlateBlue", RGB(0x7b, 0x68, 0xee) },
-  { "MediumSpringGreen", RGB(0x00, 0xfa, 0x9a) },
-  { "MediumTurquoise", RGB(0x48, 0xd1, 0xcc) },
-  { "MediumVioletRed", RGB(0xc7, 0x15, 0x85) },
-  { "MidnightBlue", RGB(0x19, 0x19, 0x70) },
-  { "MintCream", RGB(0xf5, 0xff, 0xfa) },
-  { "MistyRose", RGB(0xff, 0xe4, 0xe1) },
-  { "MistyRose1", RGB(0xff, 0xe4, 0xe1) },
-  { "MistyRose2", RGB(0xee, 0xd5, 0xd2) },
-  { "MistyRose3", RGB(0xcd, 0xb7, 0xb5) },
-  { "MistyRose4", RGB(0x8b, 0x7d, 0x7b) },
-  { "Moccasin", RGB(0xff, 0xe4, 0xb5) },
-  { "NavajoWhite", RGB(0xff, 0xde, 0xad) },
-  { "NavajoWhite1", RGB(0xff, 0xde, 0xad) },
-  { "NavajoWhite2", RGB(0xee, 0xcf, 0xa1) },
-  { "NavajoWhite3", RGB(0xcd, 0xb3, 0x8b) },
-  { "NavajoWhite4", RGB(0x8b, 0x79, 0x5e) },
-  { "Navy", RGB(0x00, 0x00, 0x80) },
-  { "NavyBlue", RGB(0x0, 0x0, 0x80) },
-  { "OldLace", RGB(0xfd, 0xf5, 0xe6) },
-  { "Olive", RGB(0x80, 0x80, 0x00) },
-  { "OliveDrab", RGB(0x6b, 0x8e, 0x23) },
-  { "OliveDrab1", RGB(0xc0, 0xff, 0x3e) },
-  { "OliveDrab2", RGB(0xb3, 0xee, 0x3a) },
-  { "OliveDrab3", RGB(0x9a, 0xcd, 0x32) },
-  { "OliveDrab4", RGB(0x69, 0x8b, 0x22) },
-  { "Orange", RGB(0xff, 0xa5, 0x00) },
-  { "Orange1", RGB(0xff, 0xa5, 0x0) },
-  { "Orange2", RGB(0xee, 0x9a, 0x0) },
-  { "Orange3", RGB(0xcd, 0x85, 0x0) },
-  { "Orange4", RGB(0x8b, 0x5a, 0x0) },
-  { "OrangeRed", RGB(0xff, 0x45, 0x00) },
-  { "OrangeRed1", RGB(0xff, 0x45, 0x0) },
-  { "OrangeRed2", RGB(0xee, 0x40, 0x0) },
-  { "OrangeRed3", RGB(0xcd, 0x37, 0x0) },
-  { "OrangeRed4", RGB(0x8b, 0x25, 0x0) },
-  { "Orchid", RGB(0xda, 0x70, 0xd6) },
-  { "Orchid1", RGB(0xff, 0x83, 0xfa) },
-  { "Orchid2", RGB(0xee, 0x7a, 0xe9) },
-  { "Orchid3", RGB(0xcd, 0x69, 0xc9) },
-  { "Orchid4", RGB(0x8b, 0x47, 0x89) },
-  { "PaleGoldenRod", RGB(0xee, 0xe8, 0xaa) },
-  { "PaleGreen", RGB(0x98, 0xfb, 0x98) },
-  { "PaleGreen1", RGB(0x9a, 0xff, 0x9a) },
-  { "PaleGreen2", RGB(0x90, 0xee, 0x90) },
-  { "PaleGreen3", RGB(0x7c, 0xcd, 0x7c) },
-  { "PaleGreen4", RGB(0x54, 0x8b, 0x54) },
-  { "PaleTurquoise", RGB(0xaf, 0xee, 0xee) },
-  { "PaleTurquoise1", RGB(0xbb, 0xff, 0xff) },
-  { "PaleTurquoise2", RGB(0xae, 0xee, 0xee) },
-  { "PaleTurquoise3", RGB(0x96, 0xcd, 0xcd) },
-  { "PaleTurquoise4", RGB(0x66, 0x8b, 0x8b) },
-  { "PaleVioletRed", RGB(0xdb, 0x70, 0x93) },
-  { "PaleVioletRed1", RGB(0xff, 0x82, 0xab) },
-  { "PaleVioletRed2", RGB(0xee, 0x79, 0x9f) },
-  { "PaleVioletRed3", RGB(0xcd, 0x68, 0x89) },
-  { "PaleVioletRed4", RGB(0x8b, 0x47, 0x5d) },
-  { "PapayaWhip", RGB(0xff, 0xef, 0xd5) },
-  { "PeachPuff", RGB(0xff, 0xda, 0xb9) },
-  { "PeachPuff1", RGB(0xff, 0xda, 0xb9) },
-  { "PeachPuff2", RGB(0xee, 0xcb, 0xad) },
-  { "PeachPuff3", RGB(0xcd, 0xaf, 0x95) },
-  { "PeachPuff4", RGB(0x8b, 0x77, 0x65) },
-  { "Peru", RGB(0xcd, 0x85, 0x3f) },
-  { "Pink", RGB(0xff, 0xc0, 0xcb) },
-  { "Pink1", RGB(0xff, 0xb5, 0xc5) },
-  { "Pink2", RGB(0xee, 0xa9, 0xb8) },
-  { "Pink3", RGB(0xcd, 0x91, 0x9e) },
-  { "Pink4", RGB(0x8b, 0x63, 0x6c) },
-  { "Plum", RGB(0xdd, 0xa0, 0xdd) },
-  { "Plum1", RGB(0xff, 0xbb, 0xff) },
-  { "Plum2", RGB(0xee, 0xae, 0xee) },
-  { "Plum3", RGB(0xcd, 0x96, 0xcd) },
-  { "Plum4", RGB(0x8b, 0x66, 0x8b) },
-  { "PowderBlue", RGB(0xb0, 0xe0, 0xe6) },
-  { "Purple", RGB(0x80, 0x00, 0x80) },
-  { "Purple1", RGB(0x9b, 0x30, 0xff) },
-  { "Purple2", RGB(0x91, 0x2c, 0xee) },
-  { "Purple3", RGB(0x7d, 0x26, 0xcd) },
-  { "Purple4", RGB(0x55, 0x1a, 0x8b) },
-  { "RebeccaPurple", RGB(0x66, 0x33, 0x99) },
-  { "Red", RGB(0xff, 0x00, 0x00) },
-  { "Red1", RGB(0xff, 0x0, 0x0) },
-  { "Red2", RGB(0xee, 0x0, 0x0) },
-  { "Red3", RGB(0xcd, 0x0, 0x0) },
-  { "Red4", RGB(0x8b, 0x0, 0x0) },
-  { "RosyBrown", RGB(0xbc, 0x8f, 0x8f) },
-  { "RosyBrown1", RGB(0xff, 0xc1, 0xc1) },
-  { "RosyBrown2", RGB(0xee, 0xb4, 0xb4) },
-  { "RosyBrown3", RGB(0xcd, 0x9b, 0x9b) },
-  { "RosyBrown4", RGB(0x8b, 0x69, 0x69) },
-  { "RoyalBlue", RGB(0x41, 0x69, 0xe1) },
-  { "RoyalBlue1", RGB(0x48, 0x76, 0xff) },
-  { "RoyalBlue2", RGB(0x43, 0x6e, 0xee) },
-  { "RoyalBlue3", RGB(0x3a, 0x5f, 0xcd) },
-  { "RoyalBlue4", RGB(0x27, 0x40, 0x8b) },
-  { "SaddleBrown", RGB(0x8b, 0x45, 0x13) },
-  { "Salmon", RGB(0xfa, 0x80, 0x72) },
-  { "Salmon1", RGB(0xff, 0x8c, 0x69) },
-  { "Salmon2", RGB(0xee, 0x82, 0x62) },
-  { "Salmon3", RGB(0xcd, 0x70, 0x54) },
-  { "Salmon4", RGB(0x8b, 0x4c, 0x39) },
-  { "SandyBrown", RGB(0xf4, 0xa4, 0x60) },
-  { "SeaGreen", RGB(0x2e, 0x8b, 0x57) },
-  { "SeaGreen1", RGB(0x54, 0xff, 0x9f) },
-  { "SeaGreen2", RGB(0x4e, 0xee, 0x94) },
-  { "SeaGreen3", RGB(0x43, 0xcd, 0x80) },
-  { "SeaGreen4", RGB(0x2e, 0x8b, 0x57) },
-  { "SeaShell", RGB(0xff, 0xf5, 0xee) },
-  { "Seashell1", RGB(0xff, 0xf5, 0xee) },
-  { "Seashell2", RGB(0xee, 0xe5, 0xde) },
-  { "Seashell3", RGB(0xcd, 0xc5, 0xbf) },
-  { "Seashell4", RGB(0x8b, 0x86, 0x82) },
-  { "Sienna", RGB(0xa0, 0x52, 0x2d) },
-  { "Sienna1", RGB(0xff, 0x82, 0x47) },
-  { "Sienna2", RGB(0xee, 0x79, 0x42) },
-  { "Sienna3", RGB(0xcd, 0x68, 0x39) },
-  { "Sienna4", RGB(0x8b, 0x47, 0x26) },
-  { "Silver", RGB(0xc0, 0xc0, 0xc0) },
-  { "SkyBlue", RGB(0x87, 0xce, 0xeb) },
-  { "SkyBlue1", RGB(0x87, 0xce, 0xff) },
-  { "SkyBlue2", RGB(0x7e, 0xc0, 0xee) },
-  { "SkyBlue3", RGB(0x6c, 0xa6, 0xcd) },
-  { "SkyBlue4", RGB(0x4a, 0x70, 0x8b) },
-  { "SlateBlue", RGB(0x6a, 0x5a, 0xcd) },
-  { "SlateBlue1", RGB(0x83, 0x6f, 0xff) },
-  { "SlateBlue2", RGB(0x7a, 0x67, 0xee) },
-  { "SlateBlue3", RGB(0x69, 0x59, 0xcd) },
-  { "SlateBlue4", RGB(0x47, 0x3c, 0x8b) },
-  { "SlateGray", RGB(0x70, 0x80, 0x90) },
-  { "SlateGray1", RGB(0xc6, 0xe2, 0xff) },
-  { "SlateGray2", RGB(0xb9, 0xd3, 0xee) },
-  { "SlateGray3", RGB(0x9f, 0xb6, 0xcd) },
-  { "SlateGray4", RGB(0x6c, 0x7b, 0x8b) },
-  { "SlateGrey", RGB(0x70, 0x80, 0x90) },
-  { "Snow", RGB(0xff, 0xfa, 0xfa) },
-  { "Snow1", RGB(0xff, 0xfa, 0xfa) },
-  { "Snow2", RGB(0xee, 0xe9, 0xe9) },
-  { "Snow3", RGB(0xcd, 0xc9, 0xc9) },
-  { "Snow4", RGB(0x8b, 0x89, 0x89) },
-  { "SpringGreen", RGB(0x00, 0xff, 0x7f) },
-  { "SpringGreen1", RGB(0x0, 0xff, 0x7f) },
-  { "SpringGreen2", RGB(0x0, 0xee, 0x76) },
-  { "SpringGreen3", RGB(0x0, 0xcd, 0x66) },
-  { "SpringGreen4", RGB(0x0, 0x8b, 0x45) },
-  { "SteelBlue", RGB(0x46, 0x82, 0xb4) },
-  { "SteelBlue1", RGB(0x63, 0xb8, 0xff) },
-  { "SteelBlue2", RGB(0x5c, 0xac, 0xee) },
-  { "SteelBlue3", RGB(0x4f, 0x94, 0xcd) },
-  { "SteelBlue4", RGB(0x36, 0x64, 0x8b) },
-  { "Tan", RGB(0xd2, 0xb4, 0x8c) },
-  { "Tan1", RGB(0xff, 0xa5, 0x4f) },
-  { "Tan2", RGB(0xee, 0x9a, 0x49) },
-  { "Tan3", RGB(0xcd, 0x85, 0x3f) },
-  { "Tan4", RGB(0x8b, 0x5a, 0x2b) },
-  { "Teal", RGB(0x00, 0x80, 0x80) },
-  { "Thistle", RGB(0xd8, 0xbf, 0xd8) },
-  { "Thistle1", RGB(0xff, 0xe1, 0xff) },
-  { "Thistle2", RGB(0xee, 0xd2, 0xee) },
-  { "Thistle3", RGB(0xcd, 0xb5, 0xcd) },
-  { "Thistle4", RGB(0x8b, 0x7b, 0x8b) },
-  { "Tomato", RGB(0xff, 0x63, 0x47) },
-  { "Tomato1", RGB(0xff, 0x63, 0x47) },
-  { "Tomato2", RGB(0xee, 0x5c, 0x42) },
-  { "Tomato3", RGB(0xcd, 0x4f, 0x39) },
-  { "Tomato4", RGB(0x8b, 0x36, 0x26) },
-  { "Turquoise", RGB(0x40, 0xe0, 0xd0) },
-  { "Turquoise1", RGB(0x0, 0xf5, 0xff) },
-  { "Turquoise2", RGB(0x0, 0xe5, 0xee) },
-  { "Turquoise3", RGB(0x0, 0xc5, 0xcd) },
-  { "Turquoise4", RGB(0x0, 0x86, 0x8b) },
-  { "Violet", RGB(0xee, 0x82, 0xee) },
-  { "VioletRed", RGB(0xd0, 0x20, 0x90) },
-  { "VioletRed1", RGB(0xff, 0x3e, 0x96) },
-  { "VioletRed2", RGB(0xee, 0x3a, 0x8c) },
-  { "VioletRed3", RGB(0xcd, 0x32, 0x78) },
-  { "VioletRed4", RGB(0x8b, 0x22, 0x52) },
-  { "WebGray", RGB(0x80, 0x80, 0x80) },
-  { "WebGreen", RGB(0x0, 0x80, 0x0) },
-  { "WebGrey", RGB(0x80, 0x80, 0x80) },
-  { "WebMaroon", RGB(0x80, 0x0, 0x0) },
-  { "WebPurple", RGB(0x80, 0x0, 0x80) },
-  { "Wheat", RGB(0xf5, 0xde, 0xb3) },
-  { "Wheat1", RGB(0xff, 0xe7, 0xba) },
-  { "Wheat2", RGB(0xee, 0xd8, 0xae) },
-  { "Wheat3", RGB(0xcd, 0xba, 0x96) },
-  { "Wheat4", RGB(0x8b, 0x7e, 0x66) },
-  { "White", RGB(0xff, 0xff, 0xff) },
-  { "WhiteSmoke", RGB(0xf5, 0xf5, 0xf5) },
-  { "X11Gray", RGB(0xbe, 0xbe, 0xbe) },
-  { "X11Green", RGB(0x0, 0xff, 0x0) },
-  { "X11Grey", RGB(0xbe, 0xbe, 0xbe) },
-  { "X11Maroon", RGB(0xb0, 0x30, 0x60) },
-  { "X11Purple", RGB(0xa0, 0x20, 0xf0) },
-  { "Yellow", RGB(0xff, 0xff, 0x00) },
-  { "Yellow1", RGB(0xff, 0xff, 0x0) },
-  { "Yellow2", RGB(0xee, 0xee, 0x0) },
-  { "Yellow3", RGB(0xcd, 0xcd, 0x0) },
-  { "Yellow4", RGB(0x8b, 0x8b, 0x0) },
-  { "YellowGreen", RGB(0x9a, 0xcd, 0x32) },
+  { "AliceBlue", RGB_(0xf0, 0xf8, 0xff) },
+  { "AntiqueWhite", RGB_(0xfa, 0xeb, 0xd7) },
+  { "AntiqueWhite1", RGB_(0xff, 0xef, 0xdb) },
+  { "AntiqueWhite2", RGB_(0xee, 0xdf, 0xcc) },
+  { "AntiqueWhite3", RGB_(0xcd, 0xc0, 0xb0) },
+  { "AntiqueWhite4", RGB_(0x8b, 0x83, 0x78) },
+  { "Aqua", RGB_(0x00, 0xff, 0xff) },
+  { "Aquamarine", RGB_(0x7f, 0xff, 0xd4) },
+  { "Aquamarine1", RGB_(0x7f, 0xff, 0xd4) },
+  { "Aquamarine2", RGB_(0x76, 0xee, 0xc6) },
+  { "Aquamarine3", RGB_(0x66, 0xcd, 0xaa) },
+  { "Aquamarine4", RGB_(0x45, 0x8b, 0x74) },
+  { "Azure", RGB_(0xf0, 0xff, 0xff) },
+  { "Azure1", RGB_(0xf0, 0xff, 0xff) },
+  { "Azure2", RGB_(0xe0, 0xee, 0xee) },
+  { "Azure3", RGB_(0xc1, 0xcd, 0xcd) },
+  { "Azure4", RGB_(0x83, 0x8b, 0x8b) },
+  { "Beige", RGB_(0xf5, 0xf5, 0xdc) },
+  { "Bisque", RGB_(0xff, 0xe4, 0xc4) },
+  { "Bisque1", RGB_(0xff, 0xe4, 0xc4) },
+  { "Bisque2", RGB_(0xee, 0xd5, 0xb7) },
+  { "Bisque3", RGB_(0xcd, 0xb7, 0x9e) },
+  { "Bisque4", RGB_(0x8b, 0x7d, 0x6b) },
+  { "Black", RGB_(0x00, 0x00, 0x00) },
+  { "BlanchedAlmond", RGB_(0xff, 0xeb, 0xcd) },
+  { "Blue", RGB_(0x00, 0x00, 0xff) },
+  { "Blue1", RGB_(0x0, 0x0, 0xff) },
+  { "Blue2", RGB_(0x0, 0x0, 0xee) },
+  { "Blue3", RGB_(0x0, 0x0, 0xcd) },
+  { "Blue4", RGB_(0x0, 0x0, 0x8b) },
+  { "BlueViolet", RGB_(0x8a, 0x2b, 0xe2) },
+  { "Brown", RGB_(0xa5, 0x2a, 0x2a) },
+  { "Brown1", RGB_(0xff, 0x40, 0x40) },
+  { "Brown2", RGB_(0xee, 0x3b, 0x3b) },
+  { "Brown3", RGB_(0xcd, 0x33, 0x33) },
+  { "Brown4", RGB_(0x8b, 0x23, 0x23) },
+  { "BurlyWood", RGB_(0xde, 0xb8, 0x87) },
+  { "Burlywood1", RGB_(0xff, 0xd3, 0x9b) },
+  { "Burlywood2", RGB_(0xee, 0xc5, 0x91) },
+  { "Burlywood3", RGB_(0xcd, 0xaa, 0x7d) },
+  { "Burlywood4", RGB_(0x8b, 0x73, 0x55) },
+  { "CadetBlue", RGB_(0x5f, 0x9e, 0xa0) },
+  { "CadetBlue1", RGB_(0x98, 0xf5, 0xff) },
+  { "CadetBlue2", RGB_(0x8e, 0xe5, 0xee) },
+  { "CadetBlue3", RGB_(0x7a, 0xc5, 0xcd) },
+  { "CadetBlue4", RGB_(0x53, 0x86, 0x8b) },
+  { "ChartReuse", RGB_(0x7f, 0xff, 0x00) },
+  { "Chartreuse1", RGB_(0x7f, 0xff, 0x0) },
+  { "Chartreuse2", RGB_(0x76, 0xee, 0x0) },
+  { "Chartreuse3", RGB_(0x66, 0xcd, 0x0) },
+  { "Chartreuse4", RGB_(0x45, 0x8b, 0x0) },
+  { "Chocolate", RGB_(0xd2, 0x69, 0x1e) },
+  { "Chocolate1", RGB_(0xff, 0x7f, 0x24) },
+  { "Chocolate2", RGB_(0xee, 0x76, 0x21) },
+  { "Chocolate3", RGB_(0xcd, 0x66, 0x1d) },
+  { "Chocolate4", RGB_(0x8b, 0x45, 0x13) },
+  { "Coral", RGB_(0xff, 0x7f, 0x50) },
+  { "Coral1", RGB_(0xff, 0x72, 0x56) },
+  { "Coral2", RGB_(0xee, 0x6a, 0x50) },
+  { "Coral3", RGB_(0xcd, 0x5b, 0x45) },
+  { "Coral4", RGB_(0x8b, 0x3e, 0x2f) },
+  { "CornFlowerBlue", RGB_(0x64, 0x95, 0xed) },
+  { "Cornsilk", RGB_(0xff, 0xf8, 0xdc) },
+  { "Cornsilk1", RGB_(0xff, 0xf8, 0xdc) },
+  { "Cornsilk2", RGB_(0xee, 0xe8, 0xcd) },
+  { "Cornsilk3", RGB_(0xcd, 0xc8, 0xb1) },
+  { "Cornsilk4", RGB_(0x8b, 0x88, 0x78) },
+  { "Crimson", RGB_(0xdc, 0x14, 0x3c) },
+  { "Cyan", RGB_(0x00, 0xff, 0xff) },
+  { "Cyan1", RGB_(0x0, 0xff, 0xff) },
+  { "Cyan2", RGB_(0x0, 0xee, 0xee) },
+  { "Cyan3", RGB_(0x0, 0xcd, 0xcd) },
+  { "Cyan4", RGB_(0x0, 0x8b, 0x8b) },
+  { "DarkBlue", RGB_(0x00, 0x00, 0x8b) },
+  { "DarkCyan", RGB_(0x00, 0x8b, 0x8b) },
+  { "DarkGoldenRod", RGB_(0xb8, 0x86, 0x0b) },
+  { "DarkGoldenrod1", RGB_(0xff, 0xb9, 0xf) },
+  { "DarkGoldenrod2", RGB_(0xee, 0xad, 0xe) },
+  { "DarkGoldenrod3", RGB_(0xcd, 0x95, 0xc) },
+  { "DarkGoldenrod4", RGB_(0x8b, 0x65, 0x8) },
+  { "DarkGray", RGB_(0xa9, 0xa9, 0xa9) },
+  { "DarkGreen", RGB_(0x00, 0x64, 0x00) },
+  { "DarkGrey", RGB_(0xa9, 0xa9, 0xa9) },
+  { "DarkKhaki", RGB_(0xbd, 0xb7, 0x6b) },
+  { "DarkMagenta", RGB_(0x8b, 0x00, 0x8b) },
+  { "DarkOliveGreen", RGB_(0x55, 0x6b, 0x2f) },
+  { "DarkOliveGreen1", RGB_(0xca, 0xff, 0x70) },
+  { "DarkOliveGreen2", RGB_(0xbc, 0xee, 0x68) },
+  { "DarkOliveGreen3", RGB_(0xa2, 0xcd, 0x5a) },
+  { "DarkOliveGreen4", RGB_(0x6e, 0x8b, 0x3d) },
+  { "DarkOrange", RGB_(0xff, 0x8c, 0x00) },
+  { "DarkOrange1", RGB_(0xff, 0x7f, 0x0) },
+  { "DarkOrange2", RGB_(0xee, 0x76, 0x0) },
+  { "DarkOrange3", RGB_(0xcd, 0x66, 0x0) },
+  { "DarkOrange4", RGB_(0x8b, 0x45, 0x0) },
+  { "DarkOrchid", RGB_(0x99, 0x32, 0xcc) },
+  { "DarkOrchid1", RGB_(0xbf, 0x3e, 0xff) },
+  { "DarkOrchid2", RGB_(0xb2, 0x3a, 0xee) },
+  { "DarkOrchid3", RGB_(0x9a, 0x32, 0xcd) },
+  { "DarkOrchid4", RGB_(0x68, 0x22, 0x8b) },
+  { "DarkRed", RGB_(0x8b, 0x00, 0x00) },
+  { "DarkSalmon", RGB_(0xe9, 0x96, 0x7a) },
+  { "DarkSeaGreen", RGB_(0x8f, 0xbc, 0x8f) },
+  { "DarkSeaGreen1", RGB_(0xc1, 0xff, 0xc1) },
+  { "DarkSeaGreen2", RGB_(0xb4, 0xee, 0xb4) },
+  { "DarkSeaGreen3", RGB_(0x9b, 0xcd, 0x9b) },
+  { "DarkSeaGreen4", RGB_(0x69, 0x8b, 0x69) },
+  { "DarkSlateBlue", RGB_(0x48, 0x3d, 0x8b) },
+  { "DarkSlateGray", RGB_(0x2f, 0x4f, 0x4f) },
+  { "DarkSlateGray1", RGB_(0x97, 0xff, 0xff) },
+  { "DarkSlateGray2", RGB_(0x8d, 0xee, 0xee) },
+  { "DarkSlateGray3", RGB_(0x79, 0xcd, 0xcd) },
+  { "DarkSlateGray4", RGB_(0x52, 0x8b, 0x8b) },
+  { "DarkSlateGrey", RGB_(0x2f, 0x4f, 0x4f) },
+  { "DarkTurquoise", RGB_(0x00, 0xce, 0xd1) },
+  { "DarkViolet", RGB_(0x94, 0x00, 0xd3) },
+  { "DarkYellow", RGB_(0xbb, 0xbb, 0x00) },
+  { "DeepPink", RGB_(0xff, 0x14, 0x93) },
+  { "DeepPink1", RGB_(0xff, 0x14, 0x93) },
+  { "DeepPink2", RGB_(0xee, 0x12, 0x89) },
+  { "DeepPink3", RGB_(0xcd, 0x10, 0x76) },
+  { "DeepPink4", RGB_(0x8b, 0xa, 0x50) },
+  { "DeepSkyBlue", RGB_(0x00, 0xbf, 0xff) },
+  { "DeepSkyBlue1", RGB_(0x0, 0xbf, 0xff) },
+  { "DeepSkyBlue2", RGB_(0x0, 0xb2, 0xee) },
+  { "DeepSkyBlue3", RGB_(0x0, 0x9a, 0xcd) },
+  { "DeepSkyBlue4", RGB_(0x0, 0x68, 0x8b) },
+  { "DimGray", RGB_(0x69, 0x69, 0x69) },
+  { "DimGrey", RGB_(0x69, 0x69, 0x69) },
+  { "DodgerBlue", RGB_(0x1e, 0x90, 0xff) },
+  { "DodgerBlue1", RGB_(0x1e, 0x90, 0xff) },
+  { "DodgerBlue2", RGB_(0x1c, 0x86, 0xee) },
+  { "DodgerBlue3", RGB_(0x18, 0x74, 0xcd) },
+  { "DodgerBlue4", RGB_(0x10, 0x4e, 0x8b) },
+  { "Firebrick", RGB_(0xb2, 0x22, 0x22) },
+  { "Firebrick1", RGB_(0xff, 0x30, 0x30) },
+  { "Firebrick2", RGB_(0xee, 0x2c, 0x2c) },
+  { "Firebrick3", RGB_(0xcd, 0x26, 0x26) },
+  { "Firebrick4", RGB_(0x8b, 0x1a, 0x1a) },
+  { "FloralWhite", RGB_(0xff, 0xfa, 0xf0) },
+  { "ForestGreen", RGB_(0x22, 0x8b, 0x22) },
+  { "Fuchsia", RGB_(0xff, 0x00, 0xff) },
+  { "Gainsboro", RGB_(0xdc, 0xdc, 0xdc) },
+  { "GhostWhite", RGB_(0xf8, 0xf8, 0xff) },
+  { "Gold", RGB_(0xff, 0xd7, 0x00) },
+  { "Gold1", RGB_(0xff, 0xd7, 0x0) },
+  { "Gold2", RGB_(0xee, 0xc9, 0x0) },
+  { "Gold3", RGB_(0xcd, 0xad, 0x0) },
+  { "Gold4", RGB_(0x8b, 0x75, 0x0) },
+  { "GoldenRod", RGB_(0xda, 0xa5, 0x20) },
+  { "Goldenrod1", RGB_(0xff, 0xc1, 0x25) },
+  { "Goldenrod2", RGB_(0xee, 0xb4, 0x22) },
+  { "Goldenrod3", RGB_(0xcd, 0x9b, 0x1d) },
+  { "Goldenrod4", RGB_(0x8b, 0x69, 0x14) },
+  { "Gray", RGB_(0x80, 0x80, 0x80) },
+  { "Gray0", RGB_(0x0, 0x0, 0x0) },
+  { "Gray1", RGB_(0x3, 0x3, 0x3) },
+  { "Gray10", RGB_(0x1a, 0x1a, 0x1a) },
+  { "Gray100", RGB_(0xff, 0xff, 0xff) },
+  { "Gray11", RGB_(0x1c, 0x1c, 0x1c) },
+  { "Gray12", RGB_(0x1f, 0x1f, 0x1f) },
+  { "Gray13", RGB_(0x21, 0x21, 0x21) },
+  { "Gray14", RGB_(0x24, 0x24, 0x24) },
+  { "Gray15", RGB_(0x26, 0x26, 0x26) },
+  { "Gray16", RGB_(0x29, 0x29, 0x29) },
+  { "Gray17", RGB_(0x2b, 0x2b, 0x2b) },
+  { "Gray18", RGB_(0x2e, 0x2e, 0x2e) },
+  { "Gray19", RGB_(0x30, 0x30, 0x30) },
+  { "Gray2", RGB_(0x5, 0x5, 0x5) },
+  { "Gray20", RGB_(0x33, 0x33, 0x33) },
+  { "Gray21", RGB_(0x36, 0x36, 0x36) },
+  { "Gray22", RGB_(0x38, 0x38, 0x38) },
+  { "Gray23", RGB_(0x3b, 0x3b, 0x3b) },
+  { "Gray24", RGB_(0x3d, 0x3d, 0x3d) },
+  { "Gray25", RGB_(0x40, 0x40, 0x40) },
+  { "Gray26", RGB_(0x42, 0x42, 0x42) },
+  { "Gray27", RGB_(0x45, 0x45, 0x45) },
+  { "Gray28", RGB_(0x47, 0x47, 0x47) },
+  { "Gray29", RGB_(0x4a, 0x4a, 0x4a) },
+  { "Gray3", RGB_(0x8, 0x8, 0x8) },
+  { "Gray30", RGB_(0x4d, 0x4d, 0x4d) },
+  { "Gray31", RGB_(0x4f, 0x4f, 0x4f) },
+  { "Gray32", RGB_(0x52, 0x52, 0x52) },
+  { "Gray33", RGB_(0x54, 0x54, 0x54) },
+  { "Gray34", RGB_(0x57, 0x57, 0x57) },
+  { "Gray35", RGB_(0x59, 0x59, 0x59) },
+  { "Gray36", RGB_(0x5c, 0x5c, 0x5c) },
+  { "Gray37", RGB_(0x5e, 0x5e, 0x5e) },
+  { "Gray38", RGB_(0x61, 0x61, 0x61) },
+  { "Gray39", RGB_(0x63, 0x63, 0x63) },
+  { "Gray4", RGB_(0xa, 0xa, 0xa) },
+  { "Gray40", RGB_(0x66, 0x66, 0x66) },
+  { "Gray41", RGB_(0x69, 0x69, 0x69) },
+  { "Gray42", RGB_(0x6b, 0x6b, 0x6b) },
+  { "Gray43", RGB_(0x6e, 0x6e, 0x6e) },
+  { "Gray44", RGB_(0x70, 0x70, 0x70) },
+  { "Gray45", RGB_(0x73, 0x73, 0x73) },
+  { "Gray46", RGB_(0x75, 0x75, 0x75) },
+  { "Gray47", RGB_(0x78, 0x78, 0x78) },
+  { "Gray48", RGB_(0x7a, 0x7a, 0x7a) },
+  { "Gray49", RGB_(0x7d, 0x7d, 0x7d) },
+  { "Gray5", RGB_(0xd, 0xd, 0xd) },
+  { "Gray50", RGB_(0x7f, 0x7f, 0x7f) },
+  { "Gray51", RGB_(0x82, 0x82, 0x82) },
+  { "Gray52", RGB_(0x85, 0x85, 0x85) },
+  { "Gray53", RGB_(0x87, 0x87, 0x87) },
+  { "Gray54", RGB_(0x8a, 0x8a, 0x8a) },
+  { "Gray55", RGB_(0x8c, 0x8c, 0x8c) },
+  { "Gray56", RGB_(0x8f, 0x8f, 0x8f) },
+  { "Gray57", RGB_(0x91, 0x91, 0x91) },
+  { "Gray58", RGB_(0x94, 0x94, 0x94) },
+  { "Gray59", RGB_(0x96, 0x96, 0x96) },
+  { "Gray6", RGB_(0xf, 0xf, 0xf) },
+  { "Gray60", RGB_(0x99, 0x99, 0x99) },
+  { "Gray61", RGB_(0x9c, 0x9c, 0x9c) },
+  { "Gray62", RGB_(0x9e, 0x9e, 0x9e) },
+  { "Gray63", RGB_(0xa1, 0xa1, 0xa1) },
+  { "Gray64", RGB_(0xa3, 0xa3, 0xa3) },
+  { "Gray65", RGB_(0xa6, 0xa6, 0xa6) },
+  { "Gray66", RGB_(0xa8, 0xa8, 0xa8) },
+  { "Gray67", RGB_(0xab, 0xab, 0xab) },
+  { "Gray68", RGB_(0xad, 0xad, 0xad) },
+  { "Gray69", RGB_(0xb0, 0xb0, 0xb0) },
+  { "Gray7", RGB_(0x12, 0x12, 0x12) },
+  { "Gray70", RGB_(0xb3, 0xb3, 0xb3) },
+  { "Gray71", RGB_(0xb5, 0xb5, 0xb5) },
+  { "Gray72", RGB_(0xb8, 0xb8, 0xb8) },
+  { "Gray73", RGB_(0xba, 0xba, 0xba) },
+  { "Gray74", RGB_(0xbd, 0xbd, 0xbd) },
+  { "Gray75", RGB_(0xbf, 0xbf, 0xbf) },
+  { "Gray76", RGB_(0xc2, 0xc2, 0xc2) },
+  { "Gray77", RGB_(0xc4, 0xc4, 0xc4) },
+  { "Gray78", RGB_(0xc7, 0xc7, 0xc7) },
+  { "Gray79", RGB_(0xc9, 0xc9, 0xc9) },
+  { "Gray8", RGB_(0x14, 0x14, 0x14) },
+  { "Gray80", RGB_(0xcc, 0xcc, 0xcc) },
+  { "Gray81", RGB_(0xcf, 0xcf, 0xcf) },
+  { "Gray82", RGB_(0xd1, 0xd1, 0xd1) },
+  { "Gray83", RGB_(0xd4, 0xd4, 0xd4) },
+  { "Gray84", RGB_(0xd6, 0xd6, 0xd6) },
+  { "Gray85", RGB_(0xd9, 0xd9, 0xd9) },
+  { "Gray86", RGB_(0xdb, 0xdb, 0xdb) },
+  { "Gray87", RGB_(0xde, 0xde, 0xde) },
+  { "Gray88", RGB_(0xe0, 0xe0, 0xe0) },
+  { "Gray89", RGB_(0xe3, 0xe3, 0xe3) },
+  { "Gray9", RGB_(0x17, 0x17, 0x17) },
+  { "Gray90", RGB_(0xe5, 0xe5, 0xe5) },
+  { "Gray91", RGB_(0xe8, 0xe8, 0xe8) },
+  { "Gray92", RGB_(0xeb, 0xeb, 0xeb) },
+  { "Gray93", RGB_(0xed, 0xed, 0xed) },
+  { "Gray94", RGB_(0xf0, 0xf0, 0xf0) },
+  { "Gray95", RGB_(0xf2, 0xf2, 0xf2) },
+  { "Gray96", RGB_(0xf5, 0xf5, 0xf5) },
+  { "Gray97", RGB_(0xf7, 0xf7, 0xf7) },
+  { "Gray98", RGB_(0xfa, 0xfa, 0xfa) },
+  { "Gray99", RGB_(0xfc, 0xfc, 0xfc) },
+  { "Green", RGB_(0x00, 0x80, 0x00) },
+  { "Green1", RGB_(0x0, 0xff, 0x0) },
+  { "Green2", RGB_(0x0, 0xee, 0x0) },
+  { "Green3", RGB_(0x0, 0xcd, 0x0) },
+  { "Green4", RGB_(0x0, 0x8b, 0x0) },
+  { "GreenYellow", RGB_(0xad, 0xff, 0x2f) },
+  { "Grey", RGB_(0x80, 0x80, 0x80) },
+  { "Grey0", RGB_(0x0, 0x0, 0x0) },
+  { "Grey1", RGB_(0x3, 0x3, 0x3) },
+  { "Grey10", RGB_(0x1a, 0x1a, 0x1a) },
+  { "Grey100", RGB_(0xff, 0xff, 0xff) },
+  { "Grey11", RGB_(0x1c, 0x1c, 0x1c) },
+  { "Grey12", RGB_(0x1f, 0x1f, 0x1f) },
+  { "Grey13", RGB_(0x21, 0x21, 0x21) },
+  { "Grey14", RGB_(0x24, 0x24, 0x24) },
+  { "Grey15", RGB_(0x26, 0x26, 0x26) },
+  { "Grey16", RGB_(0x29, 0x29, 0x29) },
+  { "Grey17", RGB_(0x2b, 0x2b, 0x2b) },
+  { "Grey18", RGB_(0x2e, 0x2e, 0x2e) },
+  { "Grey19", RGB_(0x30, 0x30, 0x30) },
+  { "Grey2", RGB_(0x5, 0x5, 0x5) },
+  { "Grey20", RGB_(0x33, 0x33, 0x33) },
+  { "Grey21", RGB_(0x36, 0x36, 0x36) },
+  { "Grey22", RGB_(0x38, 0x38, 0x38) },
+  { "Grey23", RGB_(0x3b, 0x3b, 0x3b) },
+  { "Grey24", RGB_(0x3d, 0x3d, 0x3d) },
+  { "Grey25", RGB_(0x40, 0x40, 0x40) },
+  { "Grey26", RGB_(0x42, 0x42, 0x42) },
+  { "Grey27", RGB_(0x45, 0x45, 0x45) },
+  { "Grey28", RGB_(0x47, 0x47, 0x47) },
+  { "Grey29", RGB_(0x4a, 0x4a, 0x4a) },
+  { "Grey3", RGB_(0x8, 0x8, 0x8) },
+  { "Grey30", RGB_(0x4d, 0x4d, 0x4d) },
+  { "Grey31", RGB_(0x4f, 0x4f, 0x4f) },
+  { "Grey32", RGB_(0x52, 0x52, 0x52) },
+  { "Grey33", RGB_(0x54, 0x54, 0x54) },
+  { "Grey34", RGB_(0x57, 0x57, 0x57) },
+  { "Grey35", RGB_(0x59, 0x59, 0x59) },
+  { "Grey36", RGB_(0x5c, 0x5c, 0x5c) },
+  { "Grey37", RGB_(0x5e, 0x5e, 0x5e) },
+  { "Grey38", RGB_(0x61, 0x61, 0x61) },
+  { "Grey39", RGB_(0x63, 0x63, 0x63) },
+  { "Grey4", RGB_(0xa, 0xa, 0xa) },
+  { "Grey40", RGB_(0x66, 0x66, 0x66) },
+  { "Grey41", RGB_(0x69, 0x69, 0x69) },
+  { "Grey42", RGB_(0x6b, 0x6b, 0x6b) },
+  { "Grey43", RGB_(0x6e, 0x6e, 0x6e) },
+  { "Grey44", RGB_(0x70, 0x70, 0x70) },
+  { "Grey45", RGB_(0x73, 0x73, 0x73) },
+  { "Grey46", RGB_(0x75, 0x75, 0x75) },
+  { "Grey47", RGB_(0x78, 0x78, 0x78) },
+  { "Grey48", RGB_(0x7a, 0x7a, 0x7a) },
+  { "Grey49", RGB_(0x7d, 0x7d, 0x7d) },
+  { "Grey5", RGB_(0xd, 0xd, 0xd) },
+  { "Grey50", RGB_(0x7f, 0x7f, 0x7f) },
+  { "Grey51", RGB_(0x82, 0x82, 0x82) },
+  { "Grey52", RGB_(0x85, 0x85, 0x85) },
+  { "Grey53", RGB_(0x87, 0x87, 0x87) },
+  { "Grey54", RGB_(0x8a, 0x8a, 0x8a) },
+  { "Grey55", RGB_(0x8c, 0x8c, 0x8c) },
+  { "Grey56", RGB_(0x8f, 0x8f, 0x8f) },
+  { "Grey57", RGB_(0x91, 0x91, 0x91) },
+  { "Grey58", RGB_(0x94, 0x94, 0x94) },
+  { "Grey59", RGB_(0x96, 0x96, 0x96) },
+  { "Grey6", RGB_(0xf, 0xf, 0xf) },
+  { "Grey60", RGB_(0x99, 0x99, 0x99) },
+  { "Grey61", RGB_(0x9c, 0x9c, 0x9c) },
+  { "Grey62", RGB_(0x9e, 0x9e, 0x9e) },
+  { "Grey63", RGB_(0xa1, 0xa1, 0xa1) },
+  { "Grey64", RGB_(0xa3, 0xa3, 0xa3) },
+  { "Grey65", RGB_(0xa6, 0xa6, 0xa6) },
+  { "Grey66", RGB_(0xa8, 0xa8, 0xa8) },
+  { "Grey67", RGB_(0xab, 0xab, 0xab) },
+  { "Grey68", RGB_(0xad, 0xad, 0xad) },
+  { "Grey69", RGB_(0xb0, 0xb0, 0xb0) },
+  { "Grey7", RGB_(0x12, 0x12, 0x12) },
+  { "Grey70", RGB_(0xb3, 0xb3, 0xb3) },
+  { "Grey71", RGB_(0xb5, 0xb5, 0xb5) },
+  { "Grey72", RGB_(0xb8, 0xb8, 0xb8) },
+  { "Grey73", RGB_(0xba, 0xba, 0xba) },
+  { "Grey74", RGB_(0xbd, 0xbd, 0xbd) },
+  { "Grey75", RGB_(0xbf, 0xbf, 0xbf) },
+  { "Grey76", RGB_(0xc2, 0xc2, 0xc2) },
+  { "Grey77", RGB_(0xc4, 0xc4, 0xc4) },
+  { "Grey78", RGB_(0xc7, 0xc7, 0xc7) },
+  { "Grey79", RGB_(0xc9, 0xc9, 0xc9) },
+  { "Grey8", RGB_(0x14, 0x14, 0x14) },
+  { "Grey80", RGB_(0xcc, 0xcc, 0xcc) },
+  { "Grey81", RGB_(0xcf, 0xcf, 0xcf) },
+  { "Grey82", RGB_(0xd1, 0xd1, 0xd1) },
+  { "Grey83", RGB_(0xd4, 0xd4, 0xd4) },
+  { "Grey84", RGB_(0xd6, 0xd6, 0xd6) },
+  { "Grey85", RGB_(0xd9, 0xd9, 0xd9) },
+  { "Grey86", RGB_(0xdb, 0xdb, 0xdb) },
+  { "Grey87", RGB_(0xde, 0xde, 0xde) },
+  { "Grey88", RGB_(0xe0, 0xe0, 0xe0) },
+  { "Grey89", RGB_(0xe3, 0xe3, 0xe3) },
+  { "Grey9", RGB_(0x17, 0x17, 0x17) },
+  { "Grey90", RGB_(0xe5, 0xe5, 0xe5) },
+  { "Grey91", RGB_(0xe8, 0xe8, 0xe8) },
+  { "Grey92", RGB_(0xeb, 0xeb, 0xeb) },
+  { "Grey93", RGB_(0xed, 0xed, 0xed) },
+  { "Grey94", RGB_(0xf0, 0xf0, 0xf0) },
+  { "Grey95", RGB_(0xf2, 0xf2, 0xf2) },
+  { "Grey96", RGB_(0xf5, 0xf5, 0xf5) },
+  { "Grey97", RGB_(0xf7, 0xf7, 0xf7) },
+  { "Grey98", RGB_(0xfa, 0xfa, 0xfa) },
+  { "Grey99", RGB_(0xfc, 0xfc, 0xfc) },
+  { "Honeydew", RGB_(0xf0, 0xff, 0xf0) },
+  { "Honeydew1", RGB_(0xf0, 0xff, 0xf0) },
+  { "Honeydew2", RGB_(0xe0, 0xee, 0xe0) },
+  { "Honeydew3", RGB_(0xc1, 0xcd, 0xc1) },
+  { "Honeydew4", RGB_(0x83, 0x8b, 0x83) },
+  { "HotPink", RGB_(0xff, 0x69, 0xb4) },
+  { "HotPink1", RGB_(0xff, 0x6e, 0xb4) },
+  { "HotPink2", RGB_(0xee, 0x6a, 0xa7) },
+  { "HotPink3", RGB_(0xcd, 0x60, 0x90) },
+  { "HotPink4", RGB_(0x8b, 0x3a, 0x62) },
+  { "IndianRed", RGB_(0xcd, 0x5c, 0x5c) },
+  { "IndianRed1", RGB_(0xff, 0x6a, 0x6a) },
+  { "IndianRed2", RGB_(0xee, 0x63, 0x63) },
+  { "IndianRed3", RGB_(0xcd, 0x55, 0x55) },
+  { "IndianRed4", RGB_(0x8b, 0x3a, 0x3a) },
+  { "Indigo", RGB_(0x4b, 0x00, 0x82) },
+  { "Ivory", RGB_(0xff, 0xff, 0xf0) },
+  { "Ivory1", RGB_(0xff, 0xff, 0xf0) },
+  { "Ivory2", RGB_(0xee, 0xee, 0xe0) },
+  { "Ivory3", RGB_(0xcd, 0xcd, 0xc1) },
+  { "Ivory4", RGB_(0x8b, 0x8b, 0x83) },
+  { "Khaki", RGB_(0xf0, 0xe6, 0x8c) },
+  { "Khaki1", RGB_(0xff, 0xf6, 0x8f) },
+  { "Khaki2", RGB_(0xee, 0xe6, 0x85) },
+  { "Khaki3", RGB_(0xcd, 0xc6, 0x73) },
+  { "Khaki4", RGB_(0x8b, 0x86, 0x4e) },
+  { "Lavender", RGB_(0xe6, 0xe6, 0xfa) },
+  { "LavenderBlush", RGB_(0xff, 0xf0, 0xf5) },
+  { "LavenderBlush1", RGB_(0xff, 0xf0, 0xf5) },
+  { "LavenderBlush2", RGB_(0xee, 0xe0, 0xe5) },
+  { "LavenderBlush3", RGB_(0xcd, 0xc1, 0xc5) },
+  { "LavenderBlush4", RGB_(0x8b, 0x83, 0x86) },
+  { "LawnGreen", RGB_(0x7c, 0xfc, 0x00) },
+  { "LemonChiffon", RGB_(0xff, 0xfa, 0xcd) },
+  { "LemonChiffon1", RGB_(0xff, 0xfa, 0xcd) },
+  { "LemonChiffon2", RGB_(0xee, 0xe9, 0xbf) },
+  { "LemonChiffon3", RGB_(0xcd, 0xc9, 0xa5) },
+  { "LemonChiffon4", RGB_(0x8b, 0x89, 0x70) },
+  { "LightBlue", RGB_(0xad, 0xd8, 0xe6) },
+  { "LightBlue1", RGB_(0xbf, 0xef, 0xff) },
+  { "LightBlue2", RGB_(0xb2, 0xdf, 0xee) },
+  { "LightBlue3", RGB_(0x9a, 0xc0, 0xcd) },
+  { "LightBlue4", RGB_(0x68, 0x83, 0x8b) },
+  { "LightCoral", RGB_(0xf0, 0x80, 0x80) },
+  { "LightCyan", RGB_(0xe0, 0xff, 0xff) },
+  { "LightCyan1", RGB_(0xe0, 0xff, 0xff) },
+  { "LightCyan2", RGB_(0xd1, 0xee, 0xee) },
+  { "LightCyan3", RGB_(0xb4, 0xcd, 0xcd) },
+  { "LightCyan4", RGB_(0x7a, 0x8b, 0x8b) },
+  { "LightGoldenrod", RGB_(0xee, 0xdd, 0x82) },
+  { "LightGoldenrod1", RGB_(0xff, 0xec, 0x8b) },
+  { "LightGoldenrod2", RGB_(0xee, 0xdc, 0x82) },
+  { "LightGoldenrod3", RGB_(0xcd, 0xbe, 0x70) },
+  { "LightGoldenrod4", RGB_(0x8b, 0x81, 0x4c) },
+  { "LightGoldenRodYellow", RGB_(0xfa, 0xfa, 0xd2) },
+  { "LightGray", RGB_(0xd3, 0xd3, 0xd3) },
+  { "LightGreen", RGB_(0x90, 0xee, 0x90) },
+  { "LightGrey", RGB_(0xd3, 0xd3, 0xd3) },
+  { "LightMagenta", RGB_(0xff, 0xbb, 0xff) },
+  { "LightPink", RGB_(0xff, 0xb6, 0xc1) },
+  { "LightPink1", RGB_(0xff, 0xae, 0xb9) },
+  { "LightPink2", RGB_(0xee, 0xa2, 0xad) },
+  { "LightPink3", RGB_(0xcd, 0x8c, 0x95) },
+  { "LightPink4", RGB_(0x8b, 0x5f, 0x65) },
+  { "LightRed", RGB_(0xff, 0xbb, 0xbb) },
+  { "LightSalmon", RGB_(0xff, 0xa0, 0x7a) },
+  { "LightSalmon1", RGB_(0xff, 0xa0, 0x7a) },
+  { "LightSalmon2", RGB_(0xee, 0x95, 0x72) },
+  { "LightSalmon3", RGB_(0xcd, 0x81, 0x62) },
+  { "LightSalmon4", RGB_(0x8b, 0x57, 0x42) },
+  { "LightSeaGreen", RGB_(0x20, 0xb2, 0xaa) },
+  { "LightSkyBlue", RGB_(0x87, 0xce, 0xfa) },
+  { "LightSkyBlue1", RGB_(0xb0, 0xe2, 0xff) },
+  { "LightSkyBlue2", RGB_(0xa4, 0xd3, 0xee) },
+  { "LightSkyBlue3", RGB_(0x8d, 0xb6, 0xcd) },
+  { "LightSkyBlue4", RGB_(0x60, 0x7b, 0x8b) },
+  { "LightSlateBlue", RGB_(0x84, 0x70, 0xff) },
+  { "LightSlateGray", RGB_(0x77, 0x88, 0x99) },
+  { "LightSlateGrey", RGB_(0x77, 0x88, 0x99) },
+  { "LightSteelBlue", RGB_(0xb0, 0xc4, 0xde) },
+  { "LightSteelBlue1", RGB_(0xca, 0xe1, 0xff) },
+  { "LightSteelBlue2", RGB_(0xbc, 0xd2, 0xee) },
+  { "LightSteelBlue3", RGB_(0xa2, 0xb5, 0xcd) },
+  { "LightSteelBlue4", RGB_(0x6e, 0x7b, 0x8b) },
+  { "LightYellow", RGB_(0xff, 0xff, 0xe0) },
+  { "LightYellow1", RGB_(0xff, 0xff, 0xe0) },
+  { "LightYellow2", RGB_(0xee, 0xee, 0xd1) },
+  { "LightYellow3", RGB_(0xcd, 0xcd, 0xb4) },
+  { "LightYellow4", RGB_(0x8b, 0x8b, 0x7a) },
+  { "Lime", RGB_(0x00, 0xff, 0x00) },
+  { "LimeGreen", RGB_(0x32, 0xcd, 0x32) },
+  { "Linen", RGB_(0xfa, 0xf0, 0xe6) },
+  { "Magenta", RGB_(0xff, 0x00, 0xff) },
+  { "Magenta1", RGB_(0xff, 0x0, 0xff) },
+  { "Magenta2", RGB_(0xee, 0x0, 0xee) },
+  { "Magenta3", RGB_(0xcd, 0x0, 0xcd) },
+  { "Magenta4", RGB_(0x8b, 0x0, 0x8b) },
+  { "Maroon", RGB_(0x80, 0x00, 0x00) },
+  { "Maroon1", RGB_(0xff, 0x34, 0xb3) },
+  { "Maroon2", RGB_(0xee, 0x30, 0xa7) },
+  { "Maroon3", RGB_(0xcd, 0x29, 0x90) },
+  { "Maroon4", RGB_(0x8b, 0x1c, 0x62) },
+  { "MediumAquamarine", RGB_(0x66, 0xcd, 0xaa) },
+  { "MediumBlue", RGB_(0x00, 0x00, 0xcd) },
+  { "MediumOrchid", RGB_(0xba, 0x55, 0xd3) },
+  { "MediumOrchid1", RGB_(0xe0, 0x66, 0xff) },
+  { "MediumOrchid2", RGB_(0xd1, 0x5f, 0xee) },
+  { "MediumOrchid3", RGB_(0xb4, 0x52, 0xcd) },
+  { "MediumOrchid4", RGB_(0x7a, 0x37, 0x8b) },
+  { "MediumPurple", RGB_(0x93, 0x70, 0xdb) },
+  { "MediumPurple1", RGB_(0xab, 0x82, 0xff) },
+  { "MediumPurple2", RGB_(0x9f, 0x79, 0xee) },
+  { "MediumPurple3", RGB_(0x89, 0x68, 0xcd) },
+  { "MediumPurple4", RGB_(0x5d, 0x47, 0x8b) },
+  { "MediumSeaGreen", RGB_(0x3c, 0xb3, 0x71) },
+  { "MediumSlateBlue", RGB_(0x7b, 0x68, 0xee) },
+  { "MediumSpringGreen", RGB_(0x00, 0xfa, 0x9a) },
+  { "MediumTurquoise", RGB_(0x48, 0xd1, 0xcc) },
+  { "MediumVioletRed", RGB_(0xc7, 0x15, 0x85) },
+  { "MidnightBlue", RGB_(0x19, 0x19, 0x70) },
+  { "MintCream", RGB_(0xf5, 0xff, 0xfa) },
+  { "MistyRose", RGB_(0xff, 0xe4, 0xe1) },
+  { "MistyRose1", RGB_(0xff, 0xe4, 0xe1) },
+  { "MistyRose2", RGB_(0xee, 0xd5, 0xd2) },
+  { "MistyRose3", RGB_(0xcd, 0xb7, 0xb5) },
+  { "MistyRose4", RGB_(0x8b, 0x7d, 0x7b) },
+  { "Moccasin", RGB_(0xff, 0xe4, 0xb5) },
+  { "NavajoWhite", RGB_(0xff, 0xde, 0xad) },
+  { "NavajoWhite1", RGB_(0xff, 0xde, 0xad) },
+  { "NavajoWhite2", RGB_(0xee, 0xcf, 0xa1) },
+  { "NavajoWhite3", RGB_(0xcd, 0xb3, 0x8b) },
+  { "NavajoWhite4", RGB_(0x8b, 0x79, 0x5e) },
+  { "Navy", RGB_(0x00, 0x00, 0x80) },
+  { "NavyBlue", RGB_(0x0, 0x0, 0x80) },
+  { "OldLace", RGB_(0xfd, 0xf5, 0xe6) },
+  { "Olive", RGB_(0x80, 0x80, 0x00) },
+  { "OliveDrab", RGB_(0x6b, 0x8e, 0x23) },
+  { "OliveDrab1", RGB_(0xc0, 0xff, 0x3e) },
+  { "OliveDrab2", RGB_(0xb3, 0xee, 0x3a) },
+  { "OliveDrab3", RGB_(0x9a, 0xcd, 0x32) },
+  { "OliveDrab4", RGB_(0x69, 0x8b, 0x22) },
+  { "Orange", RGB_(0xff, 0xa5, 0x00) },
+  { "Orange1", RGB_(0xff, 0xa5, 0x0) },
+  { "Orange2", RGB_(0xee, 0x9a, 0x0) },
+  { "Orange3", RGB_(0xcd, 0x85, 0x0) },
+  { "Orange4", RGB_(0x8b, 0x5a, 0x0) },
+  { "OrangeRed", RGB_(0xff, 0x45, 0x00) },
+  { "OrangeRed1", RGB_(0xff, 0x45, 0x0) },
+  { "OrangeRed2", RGB_(0xee, 0x40, 0x0) },
+  { "OrangeRed3", RGB_(0xcd, 0x37, 0x0) },
+  { "OrangeRed4", RGB_(0x8b, 0x25, 0x0) },
+  { "Orchid", RGB_(0xda, 0x70, 0xd6) },
+  { "Orchid1", RGB_(0xff, 0x83, 0xfa) },
+  { "Orchid2", RGB_(0xee, 0x7a, 0xe9) },
+  { "Orchid3", RGB_(0xcd, 0x69, 0xc9) },
+  { "Orchid4", RGB_(0x8b, 0x47, 0x89) },
+  { "PaleGoldenRod", RGB_(0xee, 0xe8, 0xaa) },
+  { "PaleGreen", RGB_(0x98, 0xfb, 0x98) },
+  { "PaleGreen1", RGB_(0x9a, 0xff, 0x9a) },
+  { "PaleGreen2", RGB_(0x90, 0xee, 0x90) },
+  { "PaleGreen3", RGB_(0x7c, 0xcd, 0x7c) },
+  { "PaleGreen4", RGB_(0x54, 0x8b, 0x54) },
+  { "PaleTurquoise", RGB_(0xaf, 0xee, 0xee) },
+  { "PaleTurquoise1", RGB_(0xbb, 0xff, 0xff) },
+  { "PaleTurquoise2", RGB_(0xae, 0xee, 0xee) },
+  { "PaleTurquoise3", RGB_(0x96, 0xcd, 0xcd) },
+  { "PaleTurquoise4", RGB_(0x66, 0x8b, 0x8b) },
+  { "PaleVioletRed", RGB_(0xdb, 0x70, 0x93) },
+  { "PaleVioletRed1", RGB_(0xff, 0x82, 0xab) },
+  { "PaleVioletRed2", RGB_(0xee, 0x79, 0x9f) },
+  { "PaleVioletRed3", RGB_(0xcd, 0x68, 0x89) },
+  { "PaleVioletRed4", RGB_(0x8b, 0x47, 0x5d) },
+  { "PapayaWhip", RGB_(0xff, 0xef, 0xd5) },
+  { "PeachPuff", RGB_(0xff, 0xda, 0xb9) },
+  { "PeachPuff1", RGB_(0xff, 0xda, 0xb9) },
+  { "PeachPuff2", RGB_(0xee, 0xcb, 0xad) },
+  { "PeachPuff3", RGB_(0xcd, 0xaf, 0x95) },
+  { "PeachPuff4", RGB_(0x8b, 0x77, 0x65) },
+  { "Peru", RGB_(0xcd, 0x85, 0x3f) },
+  { "Pink", RGB_(0xff, 0xc0, 0xcb) },
+  { "Pink1", RGB_(0xff, 0xb5, 0xc5) },
+  { "Pink2", RGB_(0xee, 0xa9, 0xb8) },
+  { "Pink3", RGB_(0xcd, 0x91, 0x9e) },
+  { "Pink4", RGB_(0x8b, 0x63, 0x6c) },
+  { "Plum", RGB_(0xdd, 0xa0, 0xdd) },
+  { "Plum1", RGB_(0xff, 0xbb, 0xff) },
+  { "Plum2", RGB_(0xee, 0xae, 0xee) },
+  { "Plum3", RGB_(0xcd, 0x96, 0xcd) },
+  { "Plum4", RGB_(0x8b, 0x66, 0x8b) },
+  { "PowderBlue", RGB_(0xb0, 0xe0, 0xe6) },
+  { "Purple", RGB_(0x80, 0x00, 0x80) },
+  { "Purple1", RGB_(0x9b, 0x30, 0xff) },
+  { "Purple2", RGB_(0x91, 0x2c, 0xee) },
+  { "Purple3", RGB_(0x7d, 0x26, 0xcd) },
+  { "Purple4", RGB_(0x55, 0x1a, 0x8b) },
+  { "RebeccaPurple", RGB_(0x66, 0x33, 0x99) },
+  { "Red", RGB_(0xff, 0x00, 0x00) },
+  { "Red1", RGB_(0xff, 0x0, 0x0) },
+  { "Red2", RGB_(0xee, 0x0, 0x0) },
+  { "Red3", RGB_(0xcd, 0x0, 0x0) },
+  { "Red4", RGB_(0x8b, 0x0, 0x0) },
+  { "RosyBrown", RGB_(0xbc, 0x8f, 0x8f) },
+  { "RosyBrown1", RGB_(0xff, 0xc1, 0xc1) },
+  { "RosyBrown2", RGB_(0xee, 0xb4, 0xb4) },
+  { "RosyBrown3", RGB_(0xcd, 0x9b, 0x9b) },
+  { "RosyBrown4", RGB_(0x8b, 0x69, 0x69) },
+  { "RoyalBlue", RGB_(0x41, 0x69, 0xe1) },
+  { "RoyalBlue1", RGB_(0x48, 0x76, 0xff) },
+  { "RoyalBlue2", RGB_(0x43, 0x6e, 0xee) },
+  { "RoyalBlue3", RGB_(0x3a, 0x5f, 0xcd) },
+  { "RoyalBlue4", RGB_(0x27, 0x40, 0x8b) },
+  { "SaddleBrown", RGB_(0x8b, 0x45, 0x13) },
+  { "Salmon", RGB_(0xfa, 0x80, 0x72) },
+  { "Salmon1", RGB_(0xff, 0x8c, 0x69) },
+  { "Salmon2", RGB_(0xee, 0x82, 0x62) },
+  { "Salmon3", RGB_(0xcd, 0x70, 0x54) },
+  { "Salmon4", RGB_(0x8b, 0x4c, 0x39) },
+  { "SandyBrown", RGB_(0xf4, 0xa4, 0x60) },
+  { "SeaGreen", RGB_(0x2e, 0x8b, 0x57) },
+  { "SeaGreen1", RGB_(0x54, 0xff, 0x9f) },
+  { "SeaGreen2", RGB_(0x4e, 0xee, 0x94) },
+  { "SeaGreen3", RGB_(0x43, 0xcd, 0x80) },
+  { "SeaGreen4", RGB_(0x2e, 0x8b, 0x57) },
+  { "SeaShell", RGB_(0xff, 0xf5, 0xee) },
+  { "Seashell1", RGB_(0xff, 0xf5, 0xee) },
+  { "Seashell2", RGB_(0xee, 0xe5, 0xde) },
+  { "Seashell3", RGB_(0xcd, 0xc5, 0xbf) },
+  { "Seashell4", RGB_(0x8b, 0x86, 0x82) },
+  { "Sienna", RGB_(0xa0, 0x52, 0x2d) },
+  { "Sienna1", RGB_(0xff, 0x82, 0x47) },
+  { "Sienna2", RGB_(0xee, 0x79, 0x42) },
+  { "Sienna3", RGB_(0xcd, 0x68, 0x39) },
+  { "Sienna4", RGB_(0x8b, 0x47, 0x26) },
+  { "Silver", RGB_(0xc0, 0xc0, 0xc0) },
+  { "SkyBlue", RGB_(0x87, 0xce, 0xeb) },
+  { "SkyBlue1", RGB_(0x87, 0xce, 0xff) },
+  { "SkyBlue2", RGB_(0x7e, 0xc0, 0xee) },
+  { "SkyBlue3", RGB_(0x6c, 0xa6, 0xcd) },
+  { "SkyBlue4", RGB_(0x4a, 0x70, 0x8b) },
+  { "SlateBlue", RGB_(0x6a, 0x5a, 0xcd) },
+  { "SlateBlue1", RGB_(0x83, 0x6f, 0xff) },
+  { "SlateBlue2", RGB_(0x7a, 0x67, 0xee) },
+  { "SlateBlue3", RGB_(0x69, 0x59, 0xcd) },
+  { "SlateBlue4", RGB_(0x47, 0x3c, 0x8b) },
+  { "SlateGray", RGB_(0x70, 0x80, 0x90) },
+  { "SlateGray1", RGB_(0xc6, 0xe2, 0xff) },
+  { "SlateGray2", RGB_(0xb9, 0xd3, 0xee) },
+  { "SlateGray3", RGB_(0x9f, 0xb6, 0xcd) },
+  { "SlateGray4", RGB_(0x6c, 0x7b, 0x8b) },
+  { "SlateGrey", RGB_(0x70, 0x80, 0x90) },
+  { "Snow", RGB_(0xff, 0xfa, 0xfa) },
+  { "Snow1", RGB_(0xff, 0xfa, 0xfa) },
+  { "Snow2", RGB_(0xee, 0xe9, 0xe9) },
+  { "Snow3", RGB_(0xcd, 0xc9, 0xc9) },
+  { "Snow4", RGB_(0x8b, 0x89, 0x89) },
+  { "SpringGreen", RGB_(0x00, 0xff, 0x7f) },
+  { "SpringGreen1", RGB_(0x0, 0xff, 0x7f) },
+  { "SpringGreen2", RGB_(0x0, 0xee, 0x76) },
+  { "SpringGreen3", RGB_(0x0, 0xcd, 0x66) },
+  { "SpringGreen4", RGB_(0x0, 0x8b, 0x45) },
+  { "SteelBlue", RGB_(0x46, 0x82, 0xb4) },
+  { "SteelBlue1", RGB_(0x63, 0xb8, 0xff) },
+  { "SteelBlue2", RGB_(0x5c, 0xac, 0xee) },
+  { "SteelBlue3", RGB_(0x4f, 0x94, 0xcd) },
+  { "SteelBlue4", RGB_(0x36, 0x64, 0x8b) },
+  { "Tan", RGB_(0xd2, 0xb4, 0x8c) },
+  { "Tan1", RGB_(0xff, 0xa5, 0x4f) },
+  { "Tan2", RGB_(0xee, 0x9a, 0x49) },
+  { "Tan3", RGB_(0xcd, 0x85, 0x3f) },
+  { "Tan4", RGB_(0x8b, 0x5a, 0x2b) },
+  { "Teal", RGB_(0x00, 0x80, 0x80) },
+  { "Thistle", RGB_(0xd8, 0xbf, 0xd8) },
+  { "Thistle1", RGB_(0xff, 0xe1, 0xff) },
+  { "Thistle2", RGB_(0xee, 0xd2, 0xee) },
+  { "Thistle3", RGB_(0xcd, 0xb5, 0xcd) },
+  { "Thistle4", RGB_(0x8b, 0x7b, 0x8b) },
+  { "Tomato", RGB_(0xff, 0x63, 0x47) },
+  { "Tomato1", RGB_(0xff, 0x63, 0x47) },
+  { "Tomato2", RGB_(0xee, 0x5c, 0x42) },
+  { "Tomato3", RGB_(0xcd, 0x4f, 0x39) },
+  { "Tomato4", RGB_(0x8b, 0x36, 0x26) },
+  { "Turquoise", RGB_(0x40, 0xe0, 0xd0) },
+  { "Turquoise1", RGB_(0x0, 0xf5, 0xff) },
+  { "Turquoise2", RGB_(0x0, 0xe5, 0xee) },
+  { "Turquoise3", RGB_(0x0, 0xc5, 0xcd) },
+  { "Turquoise4", RGB_(0x0, 0x86, 0x8b) },
+  { "Violet", RGB_(0xee, 0x82, 0xee) },
+  { "VioletRed", RGB_(0xd0, 0x20, 0x90) },
+  { "VioletRed1", RGB_(0xff, 0x3e, 0x96) },
+  { "VioletRed2", RGB_(0xee, 0x3a, 0x8c) },
+  { "VioletRed3", RGB_(0xcd, 0x32, 0x78) },
+  { "VioletRed4", RGB_(0x8b, 0x22, 0x52) },
+  { "WebGray", RGB_(0x80, 0x80, 0x80) },
+  { "WebGreen", RGB_(0x0, 0x80, 0x0) },
+  { "WebGrey", RGB_(0x80, 0x80, 0x80) },
+  { "WebMaroon", RGB_(0x80, 0x0, 0x0) },
+  { "WebPurple", RGB_(0x80, 0x0, 0x80) },
+  { "Wheat", RGB_(0xf5, 0xde, 0xb3) },
+  { "Wheat1", RGB_(0xff, 0xe7, 0xba) },
+  { "Wheat2", RGB_(0xee, 0xd8, 0xae) },
+  { "Wheat3", RGB_(0xcd, 0xba, 0x96) },
+  { "Wheat4", RGB_(0x8b, 0x7e, 0x66) },
+  { "White", RGB_(0xff, 0xff, 0xff) },
+  { "WhiteSmoke", RGB_(0xf5, 0xf5, 0xf5) },
+  { "X11Gray", RGB_(0xbe, 0xbe, 0xbe) },
+  { "X11Green", RGB_(0x0, 0xff, 0x0) },
+  { "X11Grey", RGB_(0xbe, 0xbe, 0xbe) },
+  { "X11Maroon", RGB_(0xb0, 0x30, 0x60) },
+  { "X11Purple", RGB_(0xa0, 0x20, 0xf0) },
+  { "Yellow", RGB_(0xff, 0xff, 0x00) },
+  { "Yellow1", RGB_(0xff, 0xff, 0x0) },
+  { "Yellow2", RGB_(0xee, 0xee, 0x0) },
+  { "Yellow3", RGB_(0xcd, 0xcd, 0x0) },
+  { "Yellow4", RGB_(0x8b, 0x8b, 0x0) },
+  { "YellowGreen", RGB_(0x9a, 0xcd, 0x32) },
   { NULL, 0 },
 };
 
-RgbValue name_to_color(uint8_t *name)
+
+/// Translate to RgbValue if \p name is an hex value (e.g. #XXXXXX),
+/// else look into color_name_table to translate a color name to  its
+/// hex value
+///
+/// @param[in] name string value to convert to RGB
+/// return the hex value or -1 if could not find a correct value
+RgbValue name_to_color(const char_u *name)
 {
 
   if (name[0] == '#' && isxdigit(name[1]) && isxdigit(name[2])
@@ -8252,6 +8353,7 @@ RgbValue name_to_color(uint8_t *name)
 
   return -1;
 }
+
 
 /**************************************
 *  End of Highlighting stuff	      *

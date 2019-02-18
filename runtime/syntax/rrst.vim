@@ -2,7 +2,7 @@
 " Language: reST with R code chunks
 " Maintainer: Alex Zvoleff, azvoleff@mail.sdsu.edu
 " Homepage: https://github.com/jalvesaq/R-Vim-runtime
-" Last Change: Sat Feb 06, 2016  06:45AM
+" Last Change: Thu Apr 05, 2018  11:06PM
 "
 " CONFIGURATION:
 "   To highlight chunk headers as R code, put in your vimrc:
@@ -14,12 +14,10 @@ endif
 
 " load all of the rst info
 runtime syntax/rst.vim
-unlet b:current_syntax
+unlet! b:current_syntax
 
 " load all of the r syntax highlighting rules into @R
 syntax include @R syntax/r.vim
-
-setlocal iskeyword=@,48-57,_,.
 
 " highlight R chunks
 if exists("g:rrst_syn_hl_chunk")

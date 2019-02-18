@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 /*
  * mark.c: functions for setting marks and jumping to them
  */
@@ -62,7 +65,7 @@ int setmark(int c)
 /// Free fmark_T item
 void free_fmark(fmark_T fm)
 {
-  dict_unref(fm.additional_data);
+  tv_dict_unref(fm.additional_data);
 }
 
 /// Free xfmark_T item
@@ -103,44 +106,52 @@ int setmark_pos(int c, pos_T *pos, int fnum)
     return OK;
   }
 
+  // Can't set a mark in a non-existant buffer.
+  buf_T *buf = buflist_findnr(fnum);
+  if (buf == NULL) {
+    return FAIL;
+  }
+
   if (c == '"') {
-    RESET_FMARK(&curbuf->b_last_cursor, *pos, curbuf->b_fnum);
+    RESET_FMARK(&buf->b_last_cursor, *pos, buf->b_fnum);
     return OK;
   }
 
   /* Allow setting '[ and '] for an autocommand that simulates reading a
    * file. */
   if (c == '[') {
-    curbuf->b_op_start = *pos;
+    buf->b_op_start = *pos;
     return OK;
   }
   if (c == ']') {
-    curbuf->b_op_end = *pos;
+    buf->b_op_end = *pos;
     return OK;
   }
 
   if (c == '<' || c == '>') {
-    if (c == '<')
-      curbuf->b_visual.vi_start = *pos;
-    else
-      curbuf->b_visual.vi_end = *pos;
-    if (curbuf->b_visual.vi_mode == NUL)
-      /* Visual_mode has not yet been set, use a sane default. */
-      curbuf->b_visual.vi_mode = 'v';
+    if (c == '<') {
+      buf->b_visual.vi_start = *pos;
+    } else {
+      buf->b_visual.vi_end = *pos;
+    }
+    if (buf->b_visual.vi_mode == NUL) {
+      // Visual_mode has not yet been set, use a sane default.
+      buf->b_visual.vi_mode = 'v';
+    }
     return OK;
   }
 
-  if (c > 'z')              /* some islower() and isupper() cannot handle
-                                characters above 127 */
-    return FAIL;
-  if (islower(c)) {
+  if (ASCII_ISLOWER(c)) {
     i = c - 'a';
-    RESET_FMARK(curbuf->b_namedm + i, *pos, curbuf->b_fnum);
+    RESET_FMARK(buf->b_namedm + i, *pos, fnum);
     return OK;
   }
-  if (isupper(c)) {
-    assert(c >= 'A' && c <= 'Z');
-    i = c - 'A';
+  if (ASCII_ISUPPER(c) || ascii_isdigit(c)) {
+    if (ascii_isdigit(c)) {
+      i = c - '0' + NMARKS;
+    } else {
+      i = c - 'A';
+    }
     RESET_XFMARK(namedfm + i, *pos, fnum, NULL);
     return OK;
   }
@@ -161,6 +172,10 @@ void setpcmark(void)
 
   curwin->w_prev_pcmark = curwin->w_pcmark;
   curwin->w_pcmark = curwin->w_cursor;
+
+  if (curwin->w_pcmark.lnum == 0) {
+    curwin->w_pcmark.lnum = 1;
+  }
 
   /* If jumplist is full: remove oldest entry */
   if (++curwin->w_jumplistlen > JUMPLISTSIZE) {
@@ -345,13 +360,14 @@ pos_T *getmark_buf_fnum(buf_T *buf, int c, int changefile, int *fnum)
   } else if (c == '<' || c == '>') {  /* start/end of visual area */
     startp = &buf->b_visual.vi_start;
     endp = &buf->b_visual.vi_end;
-    if ((c == '<') == lt(*startp, *endp))
+    if (((c == '<') == lt(*startp, *endp) || endp->lnum == 0)
+        && startp->lnum != 0) {
       posp = startp;
-    else
+    } else {
       posp = endp;
-    /*
-     * For Visual line mode, set mark at begin or end of line
-     */
+    }
+
+    // For Visual line mode, set mark at begin or end of line
     if (buf->b_visual.vi_mode == 'V') {
       pos_copy = *posp;
       posp = &pos_copy;
@@ -583,11 +599,12 @@ static char_u *mark_line(pos_T *mp, int lead_len)
   if (mp->lnum == 0 || mp->lnum > curbuf->b_ml.ml_line_count)
     return vim_strsave((char_u *)"-invalid-");
   assert(Columns >= 0 && (size_t)Columns <= SIZE_MAX);
-  s = vim_strnsave(skipwhite(ml_get(mp->lnum)), (size_t)Columns);
+  // Allow for up to 5 bytes per character.
+  s = vim_strnsave(skipwhite(ml_get(mp->lnum)), (size_t)Columns * 5);
 
-  /* Truncate the line to fit it in the window */
+  // Truncate the line to fit it in the window
   len = 0;
-  for (p = s; *p != NUL; mb_ptr_adv(p)) {
+  for (p = s; *p != NUL; MB_PTR_ADV(p)) {
     len += ptr2cells(p);
     if (len >= Columns - lead_len)
       break;
@@ -634,8 +651,8 @@ void do_marks(exarg_T *eap)
   show_one_mark(-1, arg, NULL, NULL, false);
 }
 
-static void 
-show_one_mark (
+static void
+show_one_mark(
     int c,
     char_u *arg,
     pos_T *p,
@@ -674,9 +691,10 @@ show_one_mark (
         mustfree = TRUE;
       }
       if (name != NULL) {
-        msg_outtrans_attr(name, current ? hl_attr(HLF_D) : 0);
-        if (mustfree)
+        msg_outtrans_attr(name, current ? HL_ATTR(HLF_D) : 0);
+        if (mustfree) {
           xfree(name);
+        }
       }
     }
     ui_flush();                    /* show one line at a time */
@@ -787,8 +805,8 @@ void ex_jumps(exarg_T *eap)
           curwin->w_jumplist[i].fmark.mark.col);
       msg_outtrans(IObuff);
       msg_outtrans_attr(name,
-          curwin->w_jumplist[i].fmark.fnum == curbuf->b_fnum
-          ? hl_attr(HLF_D) : 0);
+                        curwin->w_jumplist[i].fmark.fnum == curbuf->b_fnum
+                        ? HL_ATTR(HLF_D) : 0);
       xfree(name);
       os_breakcheck();
     }
@@ -796,6 +814,13 @@ void ex_jumps(exarg_T *eap)
   }
   if (curwin->w_jumplistidx == curwin->w_jumplistlen)
     MSG_PUTS("\n>");
+}
+
+void ex_clearjumps(exarg_T *eap)
+{
+  free_jumplist(curwin);
+  curwin->w_jumplistlen = 0;
+  curwin->w_jumplistidx = 0;
 }
 
 /*
@@ -806,7 +831,7 @@ void ex_changes(exarg_T *eap)
   int i;
   char_u      *name;
 
-  /* Highlight title */
+  // Highlight title
   MSG_PUTS_TITLE(_("\nchange line  col text"));
 
   for (i = 0; i < curbuf->b_changelistlen && !got_int; ++i) {
@@ -822,7 +847,7 @@ void ex_changes(exarg_T *eap)
           curbuf->b_changelist[i].mark.col);
       msg_outtrans(IObuff);
       name = mark_line(&curbuf->b_changelist[i].mark, 17);
-      msg_outtrans_attr(name, hl_attr(HLF_D));
+      msg_outtrans_attr(name, HL_ATTR(HLF_D));
       xfree(name);
       os_breakcheck();
     }
@@ -872,7 +897,29 @@ void ex_changes(exarg_T *eap)
  * Example: Insert two lines below 55: mark_adjust(56, MAXLNUM, 2, 0);
  *				   or: mark_adjust(56, 55, MAXLNUM, 2);
  */
-void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
+void mark_adjust(linenr_T line1,
+                 linenr_T line2,
+                 long amount,
+                 long amount_after,
+                 bool end_temp)
+{
+  mark_adjust_internal(line1, line2, amount, amount_after, true, end_temp);
+}
+
+// mark_adjust_nofold() does the same as mark_adjust() but without adjusting
+// folds in any way. Folds must be adjusted manually by the caller.
+// This is only useful when folds need to be moved in a way different to
+// calling foldMarkAdjust() with arguments line1, line2, amount, amount_after,
+// for an example of why this may be necessary, see do_move().
+void mark_adjust_nofold(linenr_T line1, linenr_T line2, long amount,
+                        long amount_after, bool end_temp)
+{
+  mark_adjust_internal(line1, line2, amount, amount_after, false, end_temp);
+}
+
+static void mark_adjust_internal(linenr_T line1, linenr_T line2,
+                                 long amount, long amount_after,
+                                 bool adjust_folds, bool end_temp)
 {
   int i;
   int fnum = curbuf->b_fnum;
@@ -913,15 +960,21 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
     one_adjust_nodel(&(curbuf->b_visual.vi_start.lnum));
     one_adjust_nodel(&(curbuf->b_visual.vi_end.lnum));
 
-    /* quickfix marks */
-    qf_mark_adjust(NULL, line1, line2, amount, amount_after);
-    /* location lists */
+    // quickfix marks
+    if (!qf_mark_adjust(NULL, line1, line2, amount, amount_after)) {
+      curbuf->b_has_qf_entry &= ~BUF_HAS_QF_ENTRY;
+    }
+    // location lists
+    bool found_one = false;
     FOR_ALL_TAB_WINDOWS(tab, win) {
-      qf_mark_adjust(win, line1, line2, amount, amount_after);
+      found_one |= qf_mark_adjust(win, line1, line2, amount, amount_after);
+    }
+    if (!found_one) {
+      curbuf->b_has_qf_entry &= ~BUF_HAS_LL_ENTRY;
     }
 
     sign_mark_adjust(line1, line2, amount, amount_after);
-    bufhl_mark_adjust(curbuf, line1, line2, amount, amount_after);
+    bufhl_mark_adjust(curbuf, line1, line2, amount, amount_after, end_temp);
   }
 
   /* previous context mark */
@@ -998,8 +1051,9 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
         }
       }
 
-      /* adjust folds */
-      foldMarkAdjust(win, line1, line2, amount, amount_after);
+      if (adjust_folds) {
+        foldMarkAdjust(win, line1, line2, amount, amount_after);
+      }
     }
   }
 
@@ -1400,3 +1454,30 @@ void free_all_marks(void)
   memset(&namedfm[0], 0, sizeof(namedfm));
 }
 #endif
+
+/// Adjust position to point to the first byte of a multi-byte character
+///
+/// If it points to a tail byte it is move backwards to the head byte.
+///
+/// @param[in]  buf  Buffer to adjust position in.
+/// @param[out]  lp  Position to adjust.
+void mark_mb_adjustpos(buf_T *buf, pos_T *lp)
+  FUNC_ATTR_NONNULL_ALL
+{
+  if (lp->col > 0 || lp->coladd > 1) {
+    const char_u *const p = ml_get_buf(buf, lp->lnum, false);
+    if (*p == NUL || (int)STRLEN(p) < lp->col) {
+      lp->col = 0;
+    } else {
+      lp->col -= utf_head_off(p, p + lp->col);
+    }
+    // Reset "coladd" when the cursor would be on the right half of a
+    // double-wide character.
+    if (lp->coladd == 1
+        && p[lp->col] != TAB
+        && vim_isprintc(utf_ptr2char(p + lp->col))
+        && ptr2cells(p + lp->col) > 1) {
+      lp->coladd = 0;
+    }
+  }
+}

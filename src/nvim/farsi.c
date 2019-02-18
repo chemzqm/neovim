@@ -1,3 +1,6 @@
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+
 /// @file farsi.c
 ///
 /// Functions for Farsi language
@@ -131,7 +134,7 @@ static char_u toF_Xor_X_(int c)
 /// @param c The character to convert.
 ///
 /// @return Character converted to the Farsi capital leter.
-char_u toF_TyA(char_u c)
+static char_u toF_TyA(char_u c)
 {
   char_u tempc;
 
@@ -321,7 +324,7 @@ static void put_curr_and_l_to_X(char_u c)
   }
 
   if ((curwin->w_cursor.col < (colnr_T)STRLEN(get_cursor_line_ptr()))) {
-    if ((p_ri && curwin->w_cursor.col) || !p_ri) {
+    if (!p_ri || curwin->w_cursor.col) {
       if (p_ri) {
         dec_cursor();
       } else {
@@ -593,78 +596,83 @@ static void chg_r_to_Xor_X_(void)
 int fkmap(int c)
 {
   int tempc;
-  static int revins;
+  int insert_mode = (State & INSERT);
+  static int revins = 0;
 
   if (IS_SPECIAL(c)) {
     return c;
   }
 
-  if (ascii_isdigit(c)
-      || ((c == '.'
-           || c == '+'
-           || c == '-'
-           || c == '^'
-           || c == '%'
-           || c == '#'
-           || c == '=')
-          && revins)) {
-    if (!revins) {
-      if (curwin->w_cursor.col) {
-        if (!p_ri) {
-          dec_cursor();
-        }
-
-        chg_c_toX_orX();
-        chg_l_toXor_X();
-        if (!p_ri) {
-          inc_cursor();
-        }
-      }
-    }
-
-    arrow_used = TRUE;
-    (void)stop_arrow();
-
-    if (!curwin->w_p_rl && revins) {
-      inc_cursor();
-    }
-
-    revins++;
-    p_ri = 1;
-  } else {
-    if (revins) {
-      arrow_used = TRUE;
-      (void)stop_arrow();
-
-      revins = 0;
-      if (curwin->w_p_rl) {
-        while ((F_isdigit(gchar_cursor())
-                || (gchar_cursor() == F_PERIOD
-                    || gchar_cursor() == F_PLUS
-                    || gchar_cursor() == F_MINUS
-                    || gchar_cursor() == F_MUL
-                    || gchar_cursor() == F_DIVIDE
-                    || gchar_cursor() == F_PERCENT
-                    || gchar_cursor() == F_EQUALS))
-                && gchar_cursor() != NUL) {
-          curwin->w_cursor.col++;
-        }
-      } else {
+  if (insert_mode) {
+    if (ascii_isdigit(c)
+        || ((c == '.'
+             || c == '+'
+             || c == '-'
+             || c == '^'
+             || c == '%'
+             || c == '#'
+             || c == '=')
+            && revins)) {
+      // Numbers are entered left-to-right.
+      if (!revins) {
         if (curwin->w_cursor.col) {
-          while ((F_isdigit(gchar_cursor())
-                 || (gchar_cursor() == F_PERIOD
-                     || gchar_cursor() == F_PLUS
-                     || gchar_cursor() == F_MINUS
-                     || gchar_cursor() == F_MUL
-                     || gchar_cursor() == F_DIVIDE
-                     || gchar_cursor() == F_PERCENT
-                     || gchar_cursor() == F_EQUALS))
-                 && --curwin->w_cursor.col) {
+          if (!p_ri) {
+            dec_cursor();
+          }
+
+          chg_c_toX_orX();
+          chg_l_toXor_X();
+          if (!p_ri) {
+            inc_cursor();
           }
         }
+      }
 
-        if (!F_isdigit(gchar_cursor())) {
-          ++curwin->w_cursor.col;
+      arrow_used = true;
+      (void)stop_arrow();
+
+      if (!curwin->w_p_rl && revins) {
+        inc_cursor();
+      }
+
+      revins++;
+      p_ri = 1;
+    } else {
+      if (revins) {
+        // Stop entering number.
+        arrow_used = true;
+        (void)stop_arrow();
+
+        revins = 0;
+        if (curwin->w_p_rl) {
+          while ((F_isdigit(gchar_cursor())
+                  || (gchar_cursor() == F_PERIOD
+                      || gchar_cursor() == F_PLUS
+                      || gchar_cursor() == F_MINUS
+                      || gchar_cursor() == F_MUL
+                      || gchar_cursor() == F_DIVIDE
+                      || gchar_cursor() == F_PERCENT
+                      || gchar_cursor() == F_EQUALS))
+                 && gchar_cursor() != NUL) {
+            curwin->w_cursor.col++;
+          }
+        } else {
+          if (curwin->w_cursor.col) {
+            while ((F_isdigit(gchar_cursor())
+                    || (gchar_cursor() == F_PERIOD
+                        || gchar_cursor() == F_PLUS
+                        || gchar_cursor() == F_MINUS
+                        || gchar_cursor() == F_MUL
+                        || gchar_cursor() == F_DIVIDE
+                        || gchar_cursor() == F_PERCENT
+                        || gchar_cursor() == F_EQUALS))
+                   && --curwin->w_cursor.col) {
+            }
+          }
+
+          if (!F_isdigit(gchar_cursor())) {
+            curwin->w_cursor.col++;
+          }
         }
       }
     }
@@ -752,7 +760,7 @@ int fkmap(int c)
     case 'Y':
     case  NL:
     case  TAB:
-      if (p_ri && (c == NL) && curwin->w_cursor.col) {
+      if (p_ri && (c == NL) && curwin->w_cursor.col && insert_mode) {
         // If the char before the cursor is _X_ or X_ do not change
         // the one under the cursor with X type.
 
@@ -823,135 +831,137 @@ int fkmap(int c)
         }
       }
 
-      if (!p_ri) {
-        dec_cursor();
-      }
+      if (insert_mode) {
+        if (!p_ri) {
+          dec_cursor();
+        }
 
-      switch ((tempc = gchar_cursor())) {
-        case _BE:
-        case _PE:
-        case _TE:
-        case _SE:
-        case _JIM:
-        case _CHE:
-        case _HE_J:
-        case _XE:
-        case _SIN:
-        case _SHIN:
-        case _SAD:
-        case _ZAD:
-        case _FE:
-        case _GHAF:
-        case _KAF:
-        case _KAF_H:
-        case _GAF:
-        case _LAM:
-        case _MIM:
-        case _NOON:
-        case _HE:
-        case _HE_:
-        case _TA:
-        case _ZA:
-          put_curr_and_l_to_X(toF_TyA((char_u)tempc));
-          break;
+        switch ((tempc = gchar_cursor())) {
+          case _BE:
+          case _PE:
+          case _TE:
+          case _SE:
+          case _JIM:
+          case _CHE:
+          case _HE_J:
+          case _XE:
+          case _SIN:
+          case _SHIN:
+          case _SAD:
+          case _ZAD:
+          case _FE:
+          case _GHAF:
+          case _KAF:
+          case _KAF_H:
+          case _GAF:
+          case _LAM:
+          case _MIM:
+          case _NOON:
+          case _HE:
+          case _HE_:
+          case _TA:
+          case _ZA:
+            put_curr_and_l_to_X(toF_TyA((char_u)tempc));
+            break;
 
-        case _AYN:
-        case _AYN_:
-          if (!p_ri) {
-            if (!curwin->w_cursor.col) {
-              put_curr_and_l_to_X(AYN);
-              break;
+          case _AYN:
+          case _AYN_:
+            if (!p_ri) {
+              if (!curwin->w_cursor.col) {
+                put_curr_and_l_to_X(AYN);
+                break;
+              }
             }
-          }
 
-          if (p_ri) {
-            inc_cursor();
-          } else {
-            dec_cursor();
-          }
-
-          if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
-            tempc = AYN_;
-          } else {
-            tempc = AYN;
-          }
-
-          if (p_ri) {
-            dec_cursor();
-          } else {
-            inc_cursor();
-          }
-
-          put_curr_and_l_to_X((char_u)tempc);
-          break;
-
-        case _GHAYN:
-        case _GHAYN_:
-
-          if (!p_ri) {
-            if (!curwin->w_cursor.col) {
-              put_curr_and_l_to_X(GHAYN);
-              break;
+            if (p_ri) {
+              inc_cursor();
+            } else {
+              dec_cursor();
             }
-          }
 
-          if (p_ri) {
-            inc_cursor();
-          } else {
-            dec_cursor();
-          }
-
-          if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
-            tempc = GHAYN_;
-          } else {
-            tempc = GHAYN;
-          }
-
-          if (p_ri) {
-            dec_cursor();
-          } else {
-            inc_cursor();
-          }
-
-          put_curr_and_l_to_X((char_u)tempc);
-          break;
-
-        case _YE:
-        case _IE:
-        case _YEE:
-
-          if (!p_ri) {
-            if (!curwin->w_cursor.col) {
-              put_curr_and_l_to_X(
-                  (tempc == _YE ? YE : tempc == _IE ? IE : YEE));
-              break;
+            if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
+              tempc = AYN_;
+            } else {
+              tempc = AYN;
             }
-          }
 
-          if (p_ri) {
-            inc_cursor();
-          } else {
-            dec_cursor();
-          }
+            if (p_ri) {
+              dec_cursor();
+            } else {
+              inc_cursor();
+            }
 
-          if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
-            tempc = (tempc == _YE ? YE_ : tempc == _IE ? IE_ : YEE_);
-          } else {
-            tempc = (tempc == _YE ? YE : tempc == _IE ? IE : YEE);
-          }
+            put_curr_and_l_to_X((char_u)tempc);
+            break;
 
-          if (p_ri) {
-            dec_cursor();
-          } else {
-            inc_cursor();
-          }
+          case _GHAYN:
+          case _GHAYN_:
 
-          put_curr_and_l_to_X((char_u)tempc);
-          break;
-      }
+            if (!p_ri) {
+              if (!curwin->w_cursor.col) {
+                put_curr_and_l_to_X(GHAYN);
+                break;
+              }
+            }
 
-      if (!p_ri) {
-        inc_cursor();
+            if (p_ri) {
+              inc_cursor();
+            } else {
+              dec_cursor();
+            }
+
+            if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
+              tempc = GHAYN_;
+            } else {
+              tempc = GHAYN;
+            }
+
+            if (p_ri) {
+              dec_cursor();
+            } else {
+              inc_cursor();
+            }
+
+            put_curr_and_l_to_X((char_u)tempc);
+            break;
+
+          case _YE:
+          case _IE:
+          case _YEE:
+
+            if (!p_ri) {
+              if (!curwin->w_cursor.col) {
+                put_curr_and_l_to_X(
+                    (tempc == _YE ? YE : tempc == _IE ? IE : YEE));
+                break;
+              }
+            }
+
+            if (p_ri) {
+              inc_cursor();
+            } else {
+              dec_cursor();
+            }
+
+            if (F_is_TyB_TyC_TyD(SRC_EDT, AT_CURSOR)) {
+              tempc = (tempc == _YE ? YE_ : tempc == _IE ? IE_ : YEE_);
+            } else {
+              tempc = (tempc == _YE ? YE : tempc == _IE ? IE : YEE);
+            }
+
+            if (p_ri) {
+              dec_cursor();
+            } else {
+              inc_cursor();
+            }
+
+            put_curr_and_l_to_X((char_u)tempc);
+            break;
+        }
+
+        if (!p_ri) {
+          inc_cursor();
+        }
       }
 
       tempc = 0;
@@ -1071,7 +1081,7 @@ int fkmap(int c)
 
       if (gchar_cursor() == _LAM) {
         chg_l_toXor_X();
-        del_char(FALSE);
+        del_char(false);
         AppendCharToRedobuff(K_BS);
 
         if (!p_ri) {
@@ -1557,7 +1567,7 @@ static char_u toF_ending(char_u c)
 }
 
 /// Convert the Farsi 3342 standard into Farsi VIM.
-void conv_to_pvim(void)
+static void conv_to_pvim(void)
 {
   char_u *ptr;
   int lnum, llen, i;
@@ -1570,7 +1580,7 @@ void conv_to_pvim(void)
         ptr[i] = toF_leading(ptr[i]);
         i++;
 
-        while (canF_Rjoin(ptr[i]) && i < llen) {
+        while (i < llen && canF_Rjoin(ptr[i])) {
           ptr[i] = toF_Rjoin(ptr[i]);
           if (F_isterm(ptr[i]) || !F_isalpha(ptr[i])) {
             break;
@@ -1588,23 +1598,23 @@ void conv_to_pvim(void)
   }
 
   // Following lines contains Farsi encoded character.
-  do_cmdline_cmd("%s/\202\231/\232/g");
-  do_cmdline_cmd("%s/\201\231/\370\334/g");
+  do_cmdline_cmd("%s/\202\231/\232/ge");
+  do_cmdline_cmd("%s/\201\231/\370\334/ge");
 
   // Assume the screen has been messed up: clear it and redraw.
-  redraw_later(CLEAR);
-  MSG_ATTR(farsi_text_1, hl_attr(HLF_S));
+  redraw_later(NOT_VALID);
+  MSG_ATTR((const char *)farsi_text_1, HL_ATTR(HLF_S));
 }
 
 /// Convert the Farsi VIM into Farsi 3342 standard.
-void conv_to_pstd(void)
+static void conv_to_pstd(void)
 {
   char_u *ptr;
   int lnum, llen, i;
 
   // Following line contains Farsi encoded character.
-  do_cmdline_cmd("%s/\232/\202\231/g");
-  for (lnum = 1; lnum <= curbuf->b_ml.ml_line_count; ++lnum) {
+  do_cmdline_cmd("%s/\232/\202\231/ge");
+  for (lnum = 1; lnum <= curbuf->b_ml.ml_line_count; lnum++) {
     ptr = ml_get((linenr_T)lnum);
     llen = (int)STRLEN(ptr);
     for (i = 0; i < llen; i++) {
@@ -1613,8 +1623,8 @@ void conv_to_pstd(void)
   }
 
   // Assume the screen has been messed up: clear it and redraw.
-  redraw_later(CLEAR);
-  MSG_ATTR(farsi_text_2, hl_attr(HLF_S));
+  redraw_later(NOT_VALID);
+  msg_attr((const char *)farsi_text_2, HL_ATTR(HLF_S));
 }
 
 /// left-right swap the characters in buf[len].
@@ -2036,34 +2046,31 @@ bool F_ischar(int c)
   return c >= TEE_ && c <= YE_;
 }
 
-void farsi_fkey(cmdarg_T *cap)
+void farsi_f8(cmdarg_T *cap FUNC_ATTR_UNUSED)
 {
-  int c = cap->cmdchar;
-
-  if (c == K_F8) {
-    if (p_altkeymap) {
-      if (curwin->w_farsi & W_R_L) {
-        p_fkmap = 0;
-        do_cmdline_cmd("set norl");
-        MSG("");
-      } else {
-        p_fkmap = 1;
-        do_cmdline_cmd("set rl");
-        MSG("");
-      }
-
-      curwin->w_farsi = curwin->w_farsi ^ W_R_L;
+  if (p_altkeymap) {
+    if (curwin->w_farsi & W_R_L) {
+      p_fkmap = 0;
+      do_cmdline_cmd("set norl");
+      MSG("");
+    } else {
+      p_fkmap = 1;
+      do_cmdline_cmd("set rl");
+      MSG("");
     }
-  }
 
-  if (c == K_F9) {
-    if (p_altkeymap && curwin->w_p_rl) {
-      curwin->w_farsi = curwin->w_farsi ^ W_CONV;
-      if (curwin->w_farsi & W_CONV) {
-        conv_to_pvim();
-      } else {
-        conv_to_pstd();
-      }
+    curwin->w_farsi = curwin->w_farsi ^ W_R_L;
+  }
+}
+
+void farsi_f9(cmdarg_T *cap FUNC_ATTR_UNUSED)
+{
+  if (p_altkeymap && curwin->w_p_rl) {
+    curwin->w_farsi = curwin->w_farsi ^ W_CONV;
+    if (curwin->w_farsi & W_CONV) {
+      conv_to_pvim();
+    } else {
+      conv_to_pstd();
     }
   }
 }

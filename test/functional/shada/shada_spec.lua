@@ -23,8 +23,6 @@ local wshada, _, shada_fname, clean =
 local dirname = 'Xtest-functional-shada-shada.d'
 local dirshada = dirname .. '/main.shada'
 
-if helpers.pending_win32(pending) then return end
-
 describe('ShaDa support code', function()
   before_each(reset)
   after_each(function()
@@ -139,7 +137,7 @@ describe('ShaDa support code', function()
 
   it('does not write NONE file', function()
     local session = spawn({nvim_prog, '-u', 'NONE', '-i', 'NONE', '--embed',
-                           '--cmd', 'qall'}, true)
+                           '--headless', '--cmd', 'qall'}, true)
     session:close()
     eq(nil, lfs.attributes('NONE'))
     eq(nil, lfs.attributes('NONE.tmp.a'))
@@ -147,8 +145,8 @@ describe('ShaDa support code', function()
 
   it('does not read NONE file', function()
     write_file('NONE', '\005\001\015\131\161na\162rX\194\162rc\145\196\001-')
-    local session = spawn({nvim_prog, '-u', 'NONE', '-i', 'NONE', '--embed'},
-                          true)
+    local session = spawn({nvim_prog, '-u', 'NONE', '-i', 'NONE', '--embed',
+                           '--headless'}, true)
     set_session(session)
     eq('', funcs.getreg('a'))
     session:close()
@@ -173,6 +171,7 @@ describe('ShaDa support code', function()
   end
 
   it('correctly uses shada-r option', function()
+    nvim_command('set shellslash')
     meths.set_var('__home', paths.test_source_path)
     nvim_command('let $HOME = __home')
     nvim_command('unlet __home')
@@ -181,21 +180,22 @@ describe('ShaDa support code', function()
     nvim_command('undo')
     nvim_command('set shada+=%')
     nvim_command('wshada! ' .. shada_fname)
-    local readme_fname = paths.test_source_path .. '/README.md'
-    readme_fname = helpers.eval( 'resolve("' .. readme_fname .. '")' )
-    eq({[7]=1, [8]=2, [9]=1, [10]=4, [11]=1}, find_file(readme_fname))
+    local readme_fname = funcs.resolve(paths.test_source_path) .. '/README.md'
+    eq({[7]=2, [8]=2, [9]=1, [10]=4, [11]=1}, find_file(readme_fname))
     nvim_command('set shada+=r~')
     nvim_command('wshada! ' .. shada_fname)
     eq({}, find_file(readme_fname))
     nvim_command('set shada-=r~')
     nvim_command('wshada! ' .. shada_fname)
-    eq({[7]=1, [8]=2, [9]=1, [10]=4, [11]=1}, find_file(readme_fname))
-    nvim_command('set shada+=r' .. paths.test_source_path)
+    eq({[7]=2, [8]=2, [9]=1, [10]=4, [11]=1}, find_file(readme_fname))
+    nvim_command('set shada+=r' .. funcs.escape(
+      funcs.escape(paths.test_source_path, '$~'), ' "\\,'))
     nvim_command('wshada! ' .. shada_fname)
     eq({}, find_file(readme_fname))
   end)
 
   it('correctly ignores case with shada-r option', function()
+    nvim_command('set shellslash')
     local pwd = funcs.getcwd()
     local relfname = 'абв/test'
     local fname = pwd .. '/' .. relfname
@@ -206,7 +206,7 @@ describe('ShaDa support code', function()
     nvim_command('undo')
     nvim_command('set shada+=%')
     nvim_command('wshada! ' .. shada_fname)
-    eq({[7]=1, [8]=2, [9]=1, [10]=4, [11]=2}, find_file(fname))
+    eq({[7]=2, [8]=2, [9]=1, [10]=4, [11]=2}, find_file(fname))
     nvim_command('set shada+=r' .. pwd .. '/АБВ')
     nvim_command('wshada! ' .. shada_fname)
     eq({}, find_file(fname))
@@ -240,6 +240,8 @@ describe('ShaDa support code', function()
   end)
 
   it('does not crash when ShaDa file directory is not writable', function()
+    if helpers.pending_win32(pending) then return end
+
     funcs.mkdir(dirname, '', 0)
     eq(0, funcs.filewritable(dirname))
     set_additional_cmd('set shada=')

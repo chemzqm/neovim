@@ -2,8 +2,15 @@ local helpers = require('test.functional.helpers')(after_each)
 local clear, nvim, buffer = helpers.clear, helpers.nvim, helpers.buffer
 local curbuf, curwin, eq = helpers.curbuf, helpers.curwin, helpers.eq
 local curbufmeths, ok = helpers.curbufmeths, helpers.ok
-local funcs, request = helpers.funcs, helpers.request
+local funcs = helpers.funcs
+local request = helpers.request
+local exc_exec = helpers.exc_exec
+local feed_command = helpers.feed_command
+local insert = helpers.insert
 local NIL = helpers.NIL
+local meth_pcall = helpers.meth_pcall
+local command = helpers.command
+local bufmeths = helpers.bufmeths
 
 describe('api/buf', function()
   before_each(clear)
@@ -28,8 +35,37 @@ describe('api/buf', function()
       -- There's always at least one line
       eq(1, curbuf_depr('line_count'))
     end)
-  end)
 
+    it('line_count has defined behaviour for unloaded buffers', function()
+      -- we'll need to know our bufnr for when it gets unloaded
+      local bufnr = curbuf('get_number')
+      -- replace the buffer contents with these three lines
+      request('nvim_buf_set_lines', bufnr, 0, -1, 1, {"line1", "line2", "line3", "line4"})
+      -- check the line count is correct
+      eq(4, request('nvim_buf_line_count', bufnr))
+      -- force unload the buffer (this will discard changes)
+      command('new')
+      command('bunload! '..bufnr)
+      -- line count for an unloaded buffer should always be 0
+      eq(0, request('nvim_buf_line_count', bufnr))
+    end)
+
+    it('get_lines has defined behaviour for unloaded buffers', function()
+      -- we'll need to know our bufnr for when it gets unloaded
+      local bufnr = curbuf('get_number')
+      -- replace the buffer contents with these three lines
+      buffer('set_lines', bufnr, 0, -1, 1, {"line1", "line2", "line3", "line4"})
+      -- confirm that getting lines works
+      eq({"line2", "line3"}, buffer('get_lines', bufnr, 1, 3, 1))
+      -- force unload the buffer (this will discard changes)
+      command('new')
+      command('bunload! '..bufnr)
+      -- attempting to get lines now always gives empty list
+      eq({}, buffer('get_lines', bufnr, 1, 3, 1))
+      -- it's impossible to get out-of-bounds errors for an unloaded buffer
+      eq({}, buffer('get_lines', bufnr, 8888, 9999, 1))
+    end)
+  end)
 
   describe('{get,set,del}_line', function()
     it('works', function()
@@ -62,7 +98,6 @@ describe('api/buf', function()
       eq('ab\0cd', curbuf_depr('get_line', 0))
     end)
   end)
-
 
   describe('{get,set}_line_slice', function()
     it('get_line_slice: out-of-bounds returns empty array', function()
@@ -114,6 +149,15 @@ describe('api/buf', function()
   describe('{get,set}_lines', function()
     local get_lines, set_lines = curbufmeths.get_lines, curbufmeths.set_lines
     local line_count = curbufmeths.line_count
+
+    it('fails correctly when input is not valid', function()
+      eq(1, curbufmeths.get_number())
+      local err, emsg = pcall(bufmeths.set_lines, 1, 1, 2, false, {'b\na'})
+      eq(false, err)
+      local exp_emsg = 'String cannot contain newlines'
+      -- Expected {filename}:{lnum}: {exp_emsg}
+      eq(': ' .. exp_emsg, emsg:sub(-#exp_emsg - 2))
+    end)
 
     it('has correct line_count when inserting and deleting', function()
       eq(1, line_count())
@@ -239,6 +283,59 @@ describe('api/buf', function()
       eq({'e', 'a', 'b', 'c', 'd'}, get_lines(0, -1, true))
     end)
 
+    it("set_line on alternate buffer does not access invalid line (E315)", function()
+      feed_command('set hidden')
+      insert('Initial file')
+      command('enew')
+      insert([[
+      More
+      Lines
+      Than
+      In
+      The
+      Other
+      Buffer]])
+      feed_command('$')
+      local retval = exc_exec("call nvim_buf_set_lines(1, 0, 1, v:false, ['test'])")
+      eq(0, retval)
+    end)
+  end)
+
+  describe('get_offset', function()
+    local get_offset = curbufmeths.get_offset
+    it('works', function()
+      curbufmeths.set_lines(0,-1,true,{'Some\r','exa\000mple', '', 'buf\rfer', 'text'})
+      eq(5, curbufmeths.line_count())
+      eq(0, get_offset(0))
+      eq(6, get_offset(1))
+      eq(15, get_offset(2))
+      eq(16, get_offset(3))
+      eq(24, get_offset(4))
+      eq(29, get_offset(5))
+      eq({false,'Index out of bounds'}, meth_pcall(get_offset, 6))
+      eq({false,'Index out of bounds'}, meth_pcall(get_offset, -1))
+
+      curbufmeths.set_option('eol', false)
+      curbufmeths.set_option('fixeol', false)
+      eq(28, get_offset(5))
+
+      -- fileformat is ignored
+      curbufmeths.set_option('fileformat', 'dos')
+      eq(0, get_offset(0))
+      eq(6, get_offset(1))
+      eq(15, get_offset(2))
+      eq(16, get_offset(3))
+      eq(24, get_offset(4))
+      eq(28, get_offset(5))
+      curbufmeths.set_option('eol', true)
+      eq(29, get_offset(5))
+
+      command("set hidden")
+      command("enew")
+      eq(6, bufmeths.get_offset(1,1))
+      command("bunload! 1")
+      eq(-1, bufmeths.get_offset(1,1))
+    end)
   end)
 
   describe('{get,set,del}_var', function()
@@ -249,6 +346,24 @@ describe('api/buf', function()
       eq(1, funcs.exists('b:lua'))
       curbufmeths.del_var('lua')
       eq(0, funcs.exists('b:lua'))
+      eq({false, 'Key not found: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
+      curbufmeths.set_var('lua', 1)
+      command('lockvar b:lua')
+      eq({false, 'Key is locked: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
+      eq({false, 'Key is locked: lua'}, meth_pcall(curbufmeths.set_var, 'lua', 1))
+      eq({false, 'Key is read-only: changedtick'},
+         meth_pcall(curbufmeths.del_var, 'changedtick'))
+      eq({false, 'Key is read-only: changedtick'},
+         meth_pcall(curbufmeths.set_var, 'changedtick', 1))
+    end)
+  end)
+
+  describe('get_changedtick', function()
+    it('works', function()
+      eq(2, curbufmeths.get_changedtick())
+      curbufmeths.set_lines(0, 1, false, {'abc\0', '\0def', 'ghi'})
+      eq(3, curbufmeths.get_changedtick())
+      eq(3, curbufmeths.get_var('changedtick'))
     end)
 
     it('buffer_set_var returns the old value', function()
@@ -292,6 +407,31 @@ describe('api/buf', function()
       ok(f ~= nil)
       f:close()
       os.remove(new_name)
+    end)
+  end)
+
+  describe('is_loaded', function()
+    it('works', function()
+      -- record our buffer number for when we unload it
+      local bufnr = curbuf('get_number')
+      -- api should report that the buffer is loaded
+      ok(buffer('is_loaded', bufnr))
+      -- hide the current buffer by switching to a new empty buffer
+      -- Careful! we need to modify the buffer first or vim will just reuse it
+      buffer('set_lines', bufnr, 0, -1, 1, {'line1'})
+      command('hide enew')
+      -- confirm the buffer is hidden, but still loaded
+      local infolist = nvim('eval', 'getbufinfo('..bufnr..')')
+      eq(1, #infolist)
+      eq(1, infolist[1].hidden)
+      eq(1, infolist[1].loaded)
+      -- now force unload the buffer
+      command('bunload! '..bufnr)
+      -- confirm the buffer is unloaded
+      infolist = nvim('eval', 'getbufinfo('..bufnr..')')
+      eq(0, infolist[1].loaded)
+      -- nvim_buf_is_loaded() should also report the buffer as unloaded
+      eq(false, buffer('is_loaded', bufnr))
     end)
   end)
 
