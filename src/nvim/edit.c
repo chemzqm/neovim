@@ -2681,7 +2681,7 @@ void ins_compl_show_pum(void)
   tv_dict_add_dict(dict, S_LEN("pumbounding"), bounding);
   tv_dict_set_keys_readonly(dict);
   textlock++;
-  apply_autocmds(EVENT_COMPLETECHANGED, NULL, NULL, false, curbuf);
+  apply_autocmds(EVENT_PUMRENDER, NULL, NULL, false, curbuf);
   textlock--;
   tv_dict_clear(dict);
 }

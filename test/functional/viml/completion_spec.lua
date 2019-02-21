@@ -960,15 +960,15 @@ describe('completion', function()
     ]])
   end)
 
-  it('CompleteChanged autocommand', function()
+  it('PumRender autocommand', function()
     curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar', ''})
     source([[
       set complete=. completeopt=noinsert,noselect,menuone
-      function! OnCompleteChanged()
+      function! OnPumRedraw()
         let g:item = get(v:event, 'completeitem', v:null)
         let g:bounding = get(v:event, 'pumbounding', v:null)
       endfunction
-      autocmd! CompleteChanged * :call OnCompleteChanged()
+      autocmd! PumRender * :call OnPumRedraw()
       call cursor(4, 1)
     ]])
 
@@ -999,8 +999,8 @@ describe('completion', function()
     source([[
       unlet g:item
       unlet g:bounding
-      delfunction OnCompleteChanged
-      au! CompleteChanged
+      delfunction OnPumRedraw
+      au! PumRender
       set complete&vim completeopt&vim
     ]])
   end)
