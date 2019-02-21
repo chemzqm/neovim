@@ -1553,10 +1553,16 @@ v:event		Dictionary of event data for the current |autocommand|.  Valid
 			regtype		Type of register as returned by
 					|getregtype()|.
 			completeitem    Current selected complete item on
-					|CompleteChanged|, Is `{}` when no complete
+					|PumRender|, Is `{}` when no complete
 					item selected.
 			pumbounding     Bounding dict of popup menu, including
-					`height` `width` `row` `col` `scrollbar`.
+					`height` - height of popup menu.
+					`width` - width of popup menu.
+					`row` - left top row count of screen.
+					`col` - left top column count of
+					screen.
+					`scrollbar` - contains scrollbar when
+					is `1`, else `0`
 
 					*v:exception* *exception-variable*
 v:exception	The value of the exception most recently caught and not
