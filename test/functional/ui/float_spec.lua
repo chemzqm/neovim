@@ -1297,4 +1297,3 @@ describe('floating windows', function()
   end)
 
 end)
-

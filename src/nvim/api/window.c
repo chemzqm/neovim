@@ -432,7 +432,6 @@ Boolean nvim_win_is_valid(Window window)
   return ret;
 }
 
-
 /// Configure window position. Currently this is only used to configure
 /// floating and external windows (including changing a split window to these
 /// types).
